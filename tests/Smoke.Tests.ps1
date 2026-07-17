@@ -10,6 +10,10 @@ if ($errors.Count -gt 0) {
 
 . $scriptPath
 
+if ($script:WdPaperLetter -ne 2) {
+    throw 'The Word Letter paper-size constant must be 2.'
+}
+
 function Assert-Equal {
     param($Actual, $Expected, [string]$Message)
     if ($Actual -ne $Expected) { throw "$Message. Expected '$Expected'; got '$Actual'." }

@@ -28,6 +28,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:WdPaperLetter = 2
 
 function Get-ObjectProperty {
     param(
@@ -140,7 +141,12 @@ function Remove-IloSession {
         Invoke-WebRequest @request | Out-Null
     }
     catch {
-        Write-Warning "Unable to close the Redfish session: $($_.Exception.Message)"
+        if ($_.Exception.Message -match '(?i)underlying connection was closed|unexpected error occurred on a send') {
+            Write-Verbose "iLO closed the connection while the Redfish session was being removed."
+        }
+        else {
+            Write-Warning "Unable to close the Redfish session: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -570,7 +576,14 @@ function New-WordHealthReport {
         $word.DisplayAlerts = 0
         $document = $word.Documents.Add()
         $section = $document.Sections.Item(1)
-        $section.PageSetup.PaperSize = 0
+        try {
+            # WdPaperSize.wdPaperLetter = 2. Some printer drivers do not
+            # advertise Letter; in that case, retain Word's current page size.
+            $section.PageSetup.PaperSize = $script:WdPaperLetter
+        }
+        catch [Runtime.InteropServices.COMException] {
+            Write-Verbose "Word cannot select Letter with the active printer; using Word's current page size."
+        }
         $section.PageSetup.TopMargin = 72
         $section.PageSetup.BottomMargin = 72
         $section.PageSetup.LeftMargin = 72
