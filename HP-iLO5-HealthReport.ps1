@@ -65,6 +65,18 @@ function Get-RedfishLink {
     return Get-ObjectProperty -InputObject $value -Name '@odata.id'
 }
 
+function Get-RedfishLinkAny {
+    param(
+        [AllowNull()][object]$Resource,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $uri = Get-RedfishLink -Resource $Resource -Name $Name
+    if ($uri) { return $uri }
+    $links = Get-ObjectProperty -InputObject $Resource -Name 'Links'
+    return Get-RedfishLink -Resource $links -Name $Name
+}
+
 function Get-HealthValue {
     param([AllowNull()][object]$Resource)
 
@@ -261,6 +273,34 @@ function Get-SafeCollectionFromUris {
     return @()
 }
 
+function Get-SafeResourceFromUris {
+    param(
+        [Parameter(Mandatory)][object]$Session,
+        [AllowEmptyCollection()][string[]]$Uris,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Notes,
+        [string]$Label = 'resource'
+    )
+
+    $candidates = @($Uris | Where-Object { $_ } | Select-Object -Unique)
+    if ($candidates.Count -eq 0) {
+        Add-CollectionNote -Notes $Notes -Message "$Label is not advertised by this system."
+        return $null
+    }
+
+    $lastError = $null
+    foreach ($uri in $candidates) {
+        try {
+            return Invoke-RedfishGet -Session $Session -Uri $uri
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+
+    Add-CollectionNote -Notes $Notes -Message "Unable to collect $Label`: $lastError"
+    return $null
+}
+
 function Get-SafeCollection {
     param(
         [Parameter(Mandatory)][object]$Session,
@@ -388,6 +428,30 @@ function Convert-LogEntry {
         'Severity' = $severity
         'Message' = Get-ObjectProperty $Item 'Message' ''
         'Repaired' = Get-ObjectProperty $hpe 'Repaired' 'N/A'
+    }
+}
+
+function Convert-SecurityDashboardOverview {
+    param([Parameter(Mandatory)][object]$Dashboard)
+
+    [PSCustomObject][ordered]@{
+        'Name' = 'Overall Security Status'
+        'Security status' = Get-ObjectProperty $Dashboard 'OverallSecurityStatus' 'Unknown'
+        'Current value' = "Server configuration lock: $(Get-ObjectProperty $Dashboard 'ServerConfigurationLockStatus' 'Unknown')"
+        'Recommended action' = ''
+        'Ignored' = $false
+    }
+}
+
+function Convert-SecurityParameter {
+    param([Parameter(Mandatory)][object]$Item)
+
+    [PSCustomObject][ordered]@{
+        'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Security parameter')
+        'Security status' = Get-ObjectProperty $Item 'SecurityStatus' 'Unknown'
+        'Current value' = Get-ObjectProperty $Item 'State' 'Unknown'
+        'Recommended action' = Get-ObjectProperty $Item 'RecommendedAction' ''
+        'Ignored' = [bool](Get-ObjectProperty $Item 'Ignore' $false)
     }
 }
 
@@ -524,6 +588,41 @@ function Get-IloHealthData {
         }
     }
 
+    $securityDashboard = [System.Collections.Generic.List[object]]::new()
+    foreach ($manager in $managers) {
+        $managerUri = Get-ObjectProperty $manager '@odata.id'
+        $securityServiceUri = Get-RedfishLinkAny $manager 'SecurityService'
+        $securityServiceFallback = if ($managerUri) { "$($managerUri.TrimEnd('/'))/SecurityService" } else { $null }
+        $securityService = Get-SafeResourceFromUris `
+            -Session $Session `
+            -Uris @($securityServiceUri, $securityServiceFallback) `
+            -Notes $notes `
+            -Label 'security service'
+        if ($null -eq $securityService) { continue }
+
+        $resolvedSecurityServiceUri = Get-ObjectProperty $securityService '@odata.id' $securityServiceUri
+        $dashboardUri = Get-RedfishLinkAny $securityService 'SecurityDashboard'
+        $dashboardFallback = if ($resolvedSecurityServiceUri) { "$($resolvedSecurityServiceUri.TrimEnd('/'))/SecurityDashboard" } else { $null }
+        $dashboard = Get-SafeResourceFromUris `
+            -Session $Session `
+            -Uris @($dashboardUri, $dashboardFallback) `
+            -Notes $notes `
+            -Label 'security dashboard'
+        if ($null -eq $dashboard) { continue }
+
+        $securityDashboard.Add((Convert-SecurityDashboardOverview $dashboard))
+        $resolvedDashboardUri = Get-ObjectProperty $dashboard '@odata.id' $dashboardUri
+        $parametersUri = Get-RedfishLinkAny $dashboard 'SecurityParameters'
+        $parametersFallback = if ($resolvedDashboardUri) { "$($resolvedDashboardUri.TrimEnd('/'))/SecurityParams" } else { $null }
+        foreach ($parameter in @(Get-SafeCollectionFromUris `
+            -Session $Session `
+            -Uris @($parametersUri, $parametersFallback) `
+            -Notes $notes `
+            -Label 'security dashboard parameters')) {
+            $securityDashboard.Add((Convert-SecurityParameter $parameter))
+        }
+    }
+
     $management = @($managers | ForEach-Object {
         [PSCustomObject][ordered]@{
             'Name' = Get-ObjectProperty $_ 'Name' (Get-ObjectProperty $_ 'Id' 'iLO Manager')
@@ -546,6 +645,7 @@ function Get-IloHealthData {
         Firmware = $firmware
         Management = $management
         EventLogs = $eventLogs.ToArray()
+        SecurityDashboard = $securityDashboard.ToArray()
         CollectionNotes = $notes.ToArray()
     }
 }
@@ -561,8 +661,8 @@ function ConvertTo-WordColor {
 function Get-StatusColor {
     param([AllowNull()][object]$Value)
     $text = [string]$Value
-    if ($text -match '(?i)critical|failed|fatal') { return ConvertTo-WordColor 'D00000' }
-    if ($text -match '(?i)warning|degraded|caution|recommended') { return ConvertTo-WordColor 'E59B00' }
+    if ($text -match '(?i)critical|failed|fatal|risk') { return ConvertTo-WordColor 'D00000' }
+    if ($text -match '(?i)warning|degraded|caution|recommended|ignored') { return ConvertTo-WordColor 'E59B00' }
     if ($text -match '(?i)^ok$|^enabled$|^healthy$') { return ConvertTo-WordColor '008A3B' }
     return ConvertTo-WordColor '555555'
 }
@@ -573,20 +673,28 @@ function Get-AssessmentStatus {
     if (@($Items).Count -eq 0) { return 'RECOMMENDED' }
     $signals = [System.Collections.Generic.List[string]]::new()
     foreach ($item in $Items) {
-        foreach ($name in @('Health', 'HealthRollup', 'State', 'Severity')) {
+        $ignored = [bool](Get-ObjectProperty -InputObject $item -Name 'Ignored' -Default $false)
+        foreach ($name in @('Health', 'HealthRollup', 'State', 'Severity', 'SecurityStatus', 'OverallSecurityStatus', 'Security status')) {
             $value = if ($item -is [Collections.IDictionary] -and $item.Contains($name)) {
                 $item[$name]
             }
             else {
                 Get-ObjectProperty -InputObject $item -Name $name
             }
-            if ($null -ne $value) { $signals.Add([string]$value) }
+            if ($null -ne $value) {
+                if ($ignored -and $name -match '(?i)security' -and [string]$value -match '(?i)^risk$') {
+                    $signals.Add('Ignored')
+                }
+                else {
+                    $signals.Add([string]$value)
+                }
+            }
         }
     }
     if ($signals.Count -eq 0) { return 'RECOMMENDED' }
     $evidence = $signals -join ' '
-    if ($evidence -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
-    if ($evidence -match '(?i)warning|degraded|caution|unknown|disabled') { return 'RECOMMENDED' }
+    if ($evidence -match '(?i)critical|failed|fatal|risk') { return 'CRITICAL' }
+    if ($evidence -match '(?i)warning|degraded|caution|unknown|disabled|ignored') { return 'RECOMMENDED' }
     return 'HEALTHY'
 }
 
@@ -599,6 +707,7 @@ function New-AssessmentSummary {
     $securityEvents = @($activeEvents | Where-Object {
         $_.Log -match '(?i)security' -or $_.Message -match '(?i)security|unauthorized|authentication'
     })
+    $securityEvidence = @((Get-ObjectProperty $Data 'SecurityDashboard' @())) + $securityEvents
     $powerThermal = @($Data.Temperatures) + @($Data.Fans) + @($Data.PowerSupplies)
     $performance = @($Data.Memory) + @($Data.Processors)
 
@@ -614,7 +723,7 @@ function New-AssessmentSummary {
         [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'Remote Support'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $activeEvents }
-        [PSCustomObject]@{ Section = 'Security'; Status = Get-AssessmentStatus $securityEvents }
+        [PSCustomObject]@{ Section = 'Security'; Status = Get-AssessmentStatus $securityEvidence }
         [PSCustomObject]@{ Section = 'Management'; Status = Get-AssessmentStatus @($Data.Management) }
         [PSCustomObject]@{ Section = 'Lifecycle Management'; Status = Get-AssessmentStatus @($Data.Firmware) }
     )
@@ -732,8 +841,9 @@ function Add-WordTable {
             $cell.Range.Text = [string]$value
             $cell.Range.Font.Name = 'Aptos'
             $cell.Range.Font.Size = 9
-            $cell.Range.Font.Bold = if ($name -in @('Health', 'Severity')) { -1 } else { 0 }
-            $cell.Range.Font.Color = if ($name -in @('Health', 'Severity', 'State')) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
+            $statusColumns = @('Health', 'Severity', 'State', 'Security status', 'SecurityStatus')
+            $cell.Range.Font.Bold = if ($name -in $statusColumns) { -1 } else { 0 }
+            $cell.Range.Font.Color = if ($name -in $statusColumns) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
             if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe }
             $cell.VerticalAlignment = 1
         }
@@ -979,6 +1089,7 @@ function New-WordHealthReport {
             @('Processors', 'Processors'),
             @('Firmware & OS Software', 'Firmware'),
             @('Management', 'Management'),
+            @('Security Dashboard', 'SecurityDashboard'),
             @('Administration - Event Logs', 'EventLogs')
         )
         foreach ($item in $sections) {
