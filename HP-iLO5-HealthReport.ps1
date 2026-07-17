@@ -15,6 +15,8 @@ param(
 
     [PSCredential]$Credential,
 
+    [string]$CustomerName = 'Customer',
+
     [string]$OutputPath,
 
     [ValidateRange(1, 3600)]
@@ -29,6 +31,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:WdPaperLetter = 2
+$script:WdPageBreak = 7
+$script:WdFieldNumPages = 26
+$script:WdFieldPage = 33
+$script:WdBorderTop = -1
+$script:WdBorderBottom = -3
+$script:ReportBlue = '005F9E'
+$script:ReportDark = '404040'
+$script:ReportStripe = 'F2F7FB'
 
 function Get-ObjectProperty {
     param(
@@ -421,6 +431,15 @@ function Get-IloHealthData {
         }
     }
 
+    $management = @($managers | ForEach-Object {
+        [PSCustomObject][ordered]@{
+            'Name' = Get-ObjectProperty $_ 'Name' (Get-ObjectProperty $_ 'Id' 'iLO Manager')
+            'Firmware version' = Get-ObjectProperty $_ 'FirmwareVersion' 'Unknown'
+            'Health' = Get-HealthValue $_
+            'State' = Get-StateValue $_
+        }
+    })
+
     [PSCustomObject][ordered]@{
         GeneratedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
         Target = $Session.BaseUri.AbsoluteUri.TrimEnd('/')
@@ -432,6 +451,7 @@ function Get-IloHealthData {
         Memory = $memory
         Processors = $processors
         Firmware = $firmware
+        Management = $management
         EventLogs = $eventLogs.ToArray()
         CollectionNotes = $notes.ToArray()
     }
@@ -448,10 +468,57 @@ function ConvertTo-WordColor {
 function Get-StatusColor {
     param([AllowNull()][object]$Value)
     $text = [string]$Value
-    if ($text -match '(?i)critical|failed|fatal') { return ConvertTo-WordColor '9B1C1C' }
-    if ($text -match '(?i)warning|degraded|caution') { return ConvertTo-WordColor '7A5A00' }
-    if ($text -match '(?i)^ok$|^enabled$') { return ConvertTo-WordColor '2E6B3A' }
+    if ($text -match '(?i)critical|failed|fatal') { return ConvertTo-WordColor 'D00000' }
+    if ($text -match '(?i)warning|degraded|caution|recommended') { return ConvertTo-WordColor 'E59B00' }
+    if ($text -match '(?i)^ok$|^enabled$|^healthy$') { return ConvertTo-WordColor '008A3B' }
     return ConvertTo-WordColor '555555'
+}
+
+function Get-AssessmentStatus {
+    param([AllowEmptyCollection()][object[]]$Items)
+
+    if (@($Items).Count -eq 0) { return 'RECOMMENDED' }
+    $evidence = ($Items | ConvertTo-Json -Depth 8 -Compress) -join ' '
+    if ($evidence -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
+    if ($evidence -match '(?i)warning|degraded|caution|unknown|disabled') { return 'RECOMMENDED' }
+    return 'HEALTHY'
+}
+
+function New-AssessmentSummary {
+    param([Parameter(Mandatory)][object]$Data)
+
+    $activeEvents = @($Data.EventLogs | Where-Object {
+        $_.Repaired -notin @($true, 'True', 'true')
+    })
+    $securityEvents = @($activeEvents | Where-Object {
+        $_.Log -match '(?i)security' -or $_.Message -match '(?i)security|unauthorized|authentication'
+    })
+    $powerThermal = @($Data.Temperatures) + @($Data.Fans) + @($Data.PowerSupplies)
+    $performance = @($Data.Memory) + @($Data.Processors)
+
+    return @(
+        [PSCustomObject]@{ Section = 'Information'; Status = Get-AssessmentStatus @($Data.ServerStatus) }
+        [PSCustomObject]@{ Section = 'System Information'; Status = Get-AssessmentStatus @($Data.ServerStatus) }
+        [PSCustomObject]@{ Section = 'Firmware & OS Software'; Status = Get-AssessmentStatus @($Data.Firmware) }
+        [PSCustomObject]@{ Section = 'iLO Federation'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'Remote Console & Media'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'Power & Thermal'; Status = Get-AssessmentStatus $powerThermal }
+        [PSCustomObject]@{ Section = 'Performance'; Status = Get-AssessmentStatus $performance }
+        [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'Remote Support'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $activeEvents }
+        [PSCustomObject]@{ Section = 'Security'; Status = Get-AssessmentStatus $securityEvents }
+        [PSCustomObject]@{ Section = 'Management'; Status = Get-AssessmentStatus @($Data.Management) }
+        [PSCustomObject]@{ Section = 'Lifecycle Management'; Status = Get-AssessmentStatus @($Data.Firmware) }
+    )
+}
+
+function Get-OverallHealthScore {
+    param([Parameter(Mandatory)][object[]]$Assessment)
+    $critical = @($Assessment | Where-Object Status -eq 'CRITICAL').Count
+    $recommended = @($Assessment | Where-Object Status -eq 'RECOMMENDED').Count
+    return [Math]::Max(0, 100 - ($critical * 15) - ($recommended * 5))
 }
 
 function Get-EndRange {
@@ -466,15 +533,21 @@ function Add-WordParagraph {
         [double]$Size = 11,
         [bool]$Bold = $false,
         [string]$Color = '222222',
-        [double]$SpaceAfter = 6
+        [double]$SpaceAfter = 6,
+        [bool]$Italic = $false,
+        [ValidateSet('Left', 'Center', 'Right')][string]$Alignment = 'Left',
+        [double]$SpaceBefore = 0
     )
     $range = Get-EndRange $Document
     $range.Text = "$Text`r"
     $paragraph = $range.Paragraphs.Item(1)
-    $paragraph.Range.Font.Name = 'Calibri'
+    $paragraph.Range.Font.Name = 'Aptos'
     $paragraph.Range.Font.Size = $Size
     $paragraph.Range.Font.Bold = [int]$Bold
+    $paragraph.Range.Font.Italic = [int]$Italic
     $paragraph.Range.Font.Color = ConvertTo-WordColor $Color
+    $paragraph.Format.Alignment = switch ($Alignment) { 'Center' { 1 } 'Right' { 2 } default { 0 } }
+    $paragraph.Format.SpaceBefore = $SpaceBefore
     $paragraph.Format.SpaceAfter = $SpaceAfter
     $paragraph.Format.LineSpacingRule = 0
 }
@@ -482,19 +555,26 @@ function Add-WordParagraph {
 function Add-WordHeading {
     param(
         [Parameter(Mandatory)][object]$Document,
-        [Parameter(Mandatory)][string]$Text
+        [Parameter(Mandatory)][string]$Text,
+        [ValidateSet(1, 2)][int]$Level = 2
     )
     $range = Get-EndRange $Document
     $range.Text = "$Text`r"
     $paragraph = $range.Paragraphs.Item(1)
-    $paragraph.Range.Style = 'Heading 1'
-    $paragraph.Range.Font.Name = 'Calibri'
-    $paragraph.Range.Font.Size = 16
+    $paragraph.Range.Style = "Heading $Level"
+    $paragraph.Range.Font.Name = 'Aptos Display'
+    $paragraph.Range.Font.Size = if ($Level -eq 1) { 16 } else { 13 }
     $paragraph.Range.Font.Bold = -1
-    $paragraph.Range.Font.Color = ConvertTo-WordColor '2E74B5'
-    $paragraph.Format.SpaceBefore = 18
-    $paragraph.Format.SpaceAfter = 10
+    $paragraph.Range.Font.Color = ConvertTo-WordColor $(if ($Level -eq 1) { $script:ReportBlue } else { $script:ReportDark })
+    $paragraph.Format.SpaceBefore = if ($Level -eq 1) { 18 } else { 8 }
+    $paragraph.Format.SpaceAfter = if ($Level -eq 1) { 6 } else { 3 }
     $paragraph.Format.KeepWithNext = -1
+    if ($Level -eq 1) {
+        $border = $paragraph.Borders.Item($script:WdBorderBottom)
+        $border.LineStyle = 1
+        $border.LineWidth = 4
+        $border.Color = ConvertTo-WordColor $script:ReportBlue
+    }
 }
 
 function Add-WordTable {
@@ -514,7 +594,7 @@ function Add-WordTable {
     $table.Style = 'Table Grid'
     $table.AllowAutoFit = $false
     $table.PreferredWidthType = 2
-    $table.PreferredWidth = 468
+    $table.PreferredWidth = 540
     $table.Rows.Item(1).HeadingFormat = -1
 
     $scores = foreach ($name in $properties) {
@@ -523,17 +603,17 @@ function Add-WordTable {
     }
     $totalScore = ($scores | Measure-Object -Sum).Sum
     for ($column = 1; $column -le $properties.Count; $column++) {
-        $table.Columns.Item($column).Width = [Math]::Max(45, 468 * $scores[$column - 1] / $totalScore)
+        $table.Columns.Item($column).Width = [Math]::Max(45, 540 * $scores[$column - 1] / $totalScore)
     }
 
     for ($column = 1; $column -le $properties.Count; $column++) {
         $cell = $table.Cell(1, $column)
         $cell.Range.Text = $properties[$column - 1]
-        $cell.Range.Font.Name = 'Calibri'
+        $cell.Range.Font.Name = 'Aptos'
         $cell.Range.Font.Size = 9
         $cell.Range.Font.Bold = -1
         $cell.Range.Font.Color = ConvertTo-WordColor 'FFFFFF'
-        $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor '1F4E78'
+        $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportBlue
         $cell.VerticalAlignment = 1
     }
 
@@ -544,11 +624,11 @@ function Add-WordTable {
             $value = $Records[$row - 1].PSObject.Properties[$name].Value
             $cell = $table.Cell($row + 1, $column)
             $cell.Range.Text = [string]$value
-            $cell.Range.Font.Name = 'Calibri'
-            $cell.Range.Font.Size = 8.5
+            $cell.Range.Font.Name = 'Aptos'
+            $cell.Range.Font.Size = 9
             $cell.Range.Font.Bold = if ($name -in @('Health', 'Severity')) { -1 } else { 0 }
             $cell.Range.Font.Color = if ($name -in @('Health', 'Severity', 'State')) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
-            if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor 'F2F4F7' }
+            if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe }
             $cell.VerticalAlignment = 1
         }
     }
@@ -561,10 +641,174 @@ function Add-WordTable {
     $afterTable.InsertParagraphAfter()
 }
 
+function Add-AssessmentSummaryTable {
+    param(
+        [Parameter(Mandatory)][object]$Document,
+        [Parameter(Mandatory)][object[]]$Assessment
+    )
+
+    $range = Get-EndRange $Document
+    $table = $Document.Tables.Add($range, 8, 4)
+    $table.Style = 'Table Grid'
+    $table.AllowAutoFit = $false
+    $table.PreferredWidthType = 2
+    $table.PreferredWidth = 540
+    $widths = @(175, 95, 175, 95)
+    for ($column = 1; $column -le 4; $column++) {
+        $table.Columns.Item($column).Width = $widths[$column - 1]
+        $header = $table.Cell(1, $column)
+        $header.Range.Text = if ($column % 2 -eq 1) { 'Section' } else { 'Status' }
+        $header.Range.Font.Name = 'Aptos'
+        $header.Range.Font.Size = 9
+        $header.Range.Font.Bold = -1
+        $header.Range.Font.Color = ConvertTo-WordColor 'FFFFFF'
+        $header.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportBlue
+        $header.VerticalAlignment = 1
+    }
+    $table.Rows.Item(1).HeadingFormat = -1
+
+    for ($row = 0; $row -lt 7; $row++) {
+        $left = $Assessment[$row * 2]
+        $right = $Assessment[($row * 2) + 1]
+        $values = @($left.Section, $left.Status, $right.Section, $right.Status)
+        for ($column = 1; $column -le 4; $column++) {
+            $cell = $table.Cell($row + 2, $column)
+            $cell.Range.Text = [string]$values[$column - 1]
+            $cell.Range.Font.Name = 'Aptos'
+            $cell.Range.Font.Size = 9
+            if ($column % 2 -eq 1) {
+                $cell.Range.Font.Color = ConvertTo-WordColor '0070C0'
+                $cell.Range.Font.Underline = 1
+            }
+            else {
+                $cell.Range.Font.Bold = -1
+                $cell.Range.Font.Color = Get-StatusColor $values[$column - 1]
+            }
+            if ($row % 2 -eq 1) {
+                $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe
+            }
+            $cell.VerticalAlignment = 1
+        }
+        $table.Rows.Item($row + 2).AllowBreakAcrossPages = 0
+    }
+    $table.TopPadding = 4
+    $table.BottomPadding = 4
+    $table.LeftPadding = 6
+    $table.RightPadding = 6
+    $afterTable = $table.Range
+    $afterTable.Collapse(0)
+    $afterTable.InsertParagraphAfter()
+}
+
+function Add-OverallHealthScore {
+    param(
+        [Parameter(Mandatory)][object]$Document,
+        [Parameter(Mandatory)][object[]]$Assessment
+    )
+
+    $score = Get-OverallHealthScore $Assessment
+    $critical = @($Assessment | Where-Object Status -eq 'CRITICAL').Count
+    $recommended = @($Assessment | Where-Object Status -eq 'RECOMMENDED').Count
+    $action = if ($critical -gt 0) { 'Action Required' } elseif ($recommended -gt 0) { 'Review Recommended' } else { 'Healthy' }
+
+    $range = Get-EndRange $Document
+    $table = $Document.Tables.Add($range, 1, 2)
+    $table.Style = 'Table Grid'
+    $table.AllowAutoFit = $false
+    $table.PreferredWidthType = 2
+    $table.PreferredWidth = 540
+    $table.Columns.Item(1).Width = 180
+    $table.Columns.Item(2).Width = 360
+    $scoreCell = $table.Cell(1, 1)
+    $scoreCell.Range.Text = "$score`r/ 100"
+    $scoreCell.Range.Font.Name = 'Aptos Display'
+    $scoreCell.Range.Font.Size = 18
+    $scoreCell.Range.Font.Bold = -1
+    $scoreCell.Range.Font.Color = ConvertTo-WordColor 'FFFFFF'
+    $scoreCell.Range.ParagraphFormat.Alignment = 1
+    $scoreCell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportBlue
+    $scoreCell.VerticalAlignment = 1
+
+    $detailCell = $table.Cell(1, 2)
+    $detailCell.Range.Text = "$action`rCritical sections: $critical    Recommended reviews: $recommended`rScore is calculated from section status evidence returned by Redfish."
+    $detailCell.Range.Font.Name = 'Aptos'
+    $detailCell.Range.Font.Size = 10
+    $detailCell.Range.Paragraphs.Item(1).Range.Font.Size = 13
+    $detailCell.Range.Paragraphs.Item(1).Range.Font.Bold = -1
+    $detailCell.Range.Paragraphs.Item(1).Range.Font.Color = Get-StatusColor $(if ($critical -gt 0) { 'CRITICAL' } elseif ($recommended -gt 0) { 'RECOMMENDED' } else { 'HEALTHY' })
+    $detailCell.Range.Paragraphs.Item(3).Range.Font.Italic = -1
+    $detailCell.Range.Paragraphs.Item(3).Range.Font.Color = ConvertTo-WordColor $script:ReportDark
+    $detailCell.VerticalAlignment = 1
+    $table.TopPadding = 6
+    $table.BottomPadding = 6
+    $table.LeftPadding = 8
+    $table.RightPadding = 8
+    $afterTable = $table.Range
+    $afterTable.Collapse(0)
+    $afterTable.InsertParagraphAfter()
+}
+
+function Set-WordReportFurniture {
+    param(
+        [Parameter(Mandatory)][object]$Section,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$CustomerName,
+        [Parameter(Mandatory)][string]$ReportDate
+    )
+
+    $header = $Section.Headers.Item(1).Range
+    $header.Text = "HP iLO Check - $Target - $CustomerName`t$ReportDate"
+    $header.Font.Name = 'Aptos'
+    $header.Font.Size = 9
+    $header.Font.Color = ConvertTo-WordColor $script:ReportDark
+    $header.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
+    $headerBorder = $header.Paragraphs.Item(1).Borders.Item($script:WdBorderBottom)
+    $headerBorder.LineStyle = 1
+    $headerBorder.LineWidth = 4
+    $headerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+
+    $footer = $Section.Footers.Item(1).Range
+    $footer.Text = "Confidential`tPage "
+    $footer.Font.Name = 'Aptos'
+    $footer.Font.Size = 9
+    $footer.Font.Color = ConvertTo-WordColor $script:ReportDark
+    $footer.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
+    $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Italic = -1
+    $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Color = ConvertTo-WordColor '888888'
+    $footer.Collapse(0)
+    $footer.Fields.Add($footer, $script:WdFieldPage) | Out-Null
+    $footer.Collapse(0)
+    $footer.InsertAfter(' of ')
+    $footer.Collapse(0)
+    $footer.Fields.Add($footer, $script:WdFieldNumPages) | Out-Null
+    $footerBorder = $Section.Footers.Item(1).Range.Paragraphs.Item(1).Borders.Item($script:WdBorderTop)
+    $footerBorder.LineStyle = 1
+    $footerBorder.LineWidth = 4
+    $footerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+}
+
+function Add-WordCover {
+    param(
+        [Parameter(Mandatory)][object]$Document,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$CustomerName,
+        [Parameter(Mandatory)][string]$ReportDate
+    )
+
+    Add-WordParagraph $Document 'HP iLO Health Check' 28 $true $script:ReportBlue 10 $false 'Center' 144
+    Add-WordParagraph $Document $Target 20 $false $script:ReportDark 6 $false 'Center'
+    Add-WordParagraph $Document $CustomerName 16 $false $script:ReportDark 6 $false 'Center'
+    Add-WordParagraph $Document $ReportDate 13 $false '888888' 0 $false 'Center'
+    Add-WordParagraph $Document '[Confidential]' 11 $false 'AAAAAA' 0 $true 'Center' 12
+    $breakRange = Get-EndRange $Document
+    $breakRange.InsertBreak($script:WdPageBreak)
+}
+
 function New-WordHealthReport {
     param(
         [Parameter(Mandatory)][object]$Data,
-        [Parameter(Mandatory)][string]$OutputPath
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][string]$CustomerName
     )
 
     if ($env:OS -ne 'Windows_NT') { throw 'Microsoft Word report generation requires Windows.' }
@@ -584,53 +828,58 @@ function New-WordHealthReport {
         catch [Runtime.InteropServices.COMException] {
             Write-Verbose "Word cannot select Letter with the active printer; using Word's current page size."
         }
-        $section.PageSetup.TopMargin = 72
-        $section.PageSetup.BottomMargin = 72
-        $section.PageSetup.LeftMargin = 72
-        $section.PageSetup.RightMargin = 72
-        $section.PageSetup.HeaderDistance = 35.4
-        $section.PageSetup.FooterDistance = 35.4
+        $section.PageSetup.TopMargin = 36
+        $section.PageSetup.BottomMargin = 36
+        $section.PageSetup.LeftMargin = 36
+        $section.PageSetup.RightMargin = 36
+        $section.PageSetup.HeaderDistance = 21.6
+        $section.PageSetup.FooterDistance = 21.6
 
         $normal = $document.Styles.Item('Normal')
-        $normal.Font.Name = 'Calibri'
+        $normal.Font.Name = 'Aptos'
         $normal.Font.Size = 11
-        $normal.ParagraphFormat.SpaceAfter = 6
+        $normal.Font.Color = ConvertTo-WordColor $script:ReportDark
+        $normal.ParagraphFormat.SpaceAfter = 2
 
-        $footer = $section.Footers.Item(1).Range
-        $footer.Text = 'HP iLO 5 Health Check Report  |  Page '
-        $footer.Font.Name = 'Calibri'
-        $footer.Font.Size = 8.5
-        $footer.Font.Color = ConvertTo-WordColor '666666'
-        $footer.ParagraphFormat.Alignment = 2
-        $footer.Collapse(0)
-        $footer.Fields.Add($footer, 33) | Out-Null
+        $reportDate = Get-Date -Format 'MMMM d, yyyy'
+        $displayTarget = ([uri]$Data.Target).Host
+        Set-WordReportFurniture $section $displayTarget $CustomerName $reportDate
+        Add-WordCover $document $displayTarget $CustomerName $reportDate
 
-        Add-WordParagraph $document 'HP iLO 5 Health Check Report' 25 $false '1F4E78' 6
-        Add-WordParagraph $document "Target: $($Data.Target)  |  Generated: $($Data.GeneratedAt)" 10 $false '555555' 15
-        Add-WordHeading $document 'Executive health summary'
+        Add-WordHeading $document 'Executive Overview' 1
+        Add-WordParagraph $document "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." 11 $false '222222' 2
+
+        $assessment = @(New-AssessmentSummary $Data)
+        Add-WordHeading $document 'Assessment Summary' 2
+        Add-AssessmentSummaryTable $document $assessment
+        Add-WordHeading $document 'Overall Health Score' 2
+        Add-OverallHealthScore $document $assessment
+
+        Add-WordHeading $document 'Information' 2
         $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
             [PSCustomObject][ordered]@{ Item = $_.Key; Value = $_.Value }
         })
         Add-WordTable $document $summaryRows 'Server status was not available.'
 
         $sections = @(
-            @('Temperatures', 'Temperatures'),
-            @('Fans', 'Fans'),
-            @('Power supplies', 'PowerSupplies'),
+            @('Power & Thermal - Temperatures', 'Temperatures'),
+            @('Power & Thermal - Fans', 'Fans'),
+            @('Power & Thermal - Power Supplies', 'PowerSupplies'),
             @('Storage', 'Storage'),
             @('Memory', 'Memory'),
             @('Processors', 'Processors'),
-            @('Firmware', 'Firmware'),
-            @('Event logs', 'EventLogs')
+            @('Firmware & OS Software', 'Firmware'),
+            @('Management', 'Management'),
+            @('Administration - Event Logs', 'EventLogs')
         )
         foreach ($item in $sections) {
-            Add-WordHeading $document $item[0]
+            Add-WordHeading $document $item[0] 2
             $records = @($Data.PSObject.Properties[$item[1]].Value)
             Add-WordTable $document $records "No $($item[0].ToLowerInvariant()) data was returned."
         }
 
         if (@($Data.CollectionNotes).Count -gt 0) {
-            Add-WordHeading $document 'Collection notes'
+            Add-WordHeading $document 'Collection Notes' 2
             foreach ($note in $Data.CollectionNotes) {
                 Add-WordParagraph $document "- $note" 9.5 $false '666666' 4
             }
@@ -655,6 +904,7 @@ function Invoke-IloHealthReport {
     param(
         [string]$IloAddress,
         [PSCredential]$Credential,
+        [string]$CustomerName = 'Customer',
         [string]$OutputPath,
         [int]$TimeoutSec = 30,
         [int]$MaxLogEntries = 100,
@@ -700,7 +950,7 @@ function Invoke-IloHealthReport {
             -TimeoutSec $TimeoutSec `
             -IgnoreCertificateErrors ([bool]$SkipCertificateCheck)
         $data = Get-IloHealthData $session $MaxLogEntries
-        $reportPath = New-WordHealthReport $data $OutputPath
+        $reportPath = New-WordHealthReport -Data $data -OutputPath $OutputPath -CustomerName $CustomerName
         Write-Host "Word report created: $reportPath" -ForegroundColor Green
     }
     finally {
