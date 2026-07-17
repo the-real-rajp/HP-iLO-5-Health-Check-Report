@@ -28,10 +28,14 @@ function Assert-Equal {
 $resource = [PSCustomObject]@{
     Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
     Memory = [PSCustomObject]@{ '@odata.id' = '/redfish/v1/Systems/1/Memory' }
+    Links = [PSCustomObject]@{
+        SecurityService = [PSCustomObject]@{ '@odata.id' = '/redfish/v1/Managers/1/SecurityService' }
+    }
 }
 Assert-Equal (Get-HealthValue $resource) 'OK' 'Health extraction failed'
 Assert-Equal (Get-StateValue $resource) 'Enabled' 'State extraction failed'
 Assert-Equal (Get-RedfishLink $resource 'Memory') '/redfish/v1/Systems/1/Memory' 'Link extraction failed'
+Assert-Equal (Get-RedfishLinkAny $resource 'SecurityService') '/redfish/v1/Managers/1/SecurityService' 'Nested link extraction failed'
 Assert-Equal (Resolve-RedfishUri ([uri]'https://ilo.example.com/') '/redfish/v1/') 'https://ilo.example.com/redfish/v1/' 'URI resolution failed'
 Assert-Equal (ConvertTo-WordColor '1F4E78') 7884319 'Word color conversion failed'
 
@@ -46,6 +50,18 @@ Assert-Equal $temperature.Health 'OK' 'Temperature health conversion failed'
 Assert-Equal (Test-ReportRecordPresent $temperature) $true 'Enabled temperature should be included'
 $absentTemperature = [PSCustomObject]@{ Name = 'Unused sensor'; State = 'Absent' }
 Assert-Equal (Test-ReportRecordPresent $absentTemperature) $false 'Absent temperature should be excluded'
+
+$securityParameter = Convert-SecurityParameter ([PSCustomObject]@{
+    Name = 'Minimum password length'
+    SecurityStatus = 'Risk'
+    State = '8 characters'
+    RecommendedAction = 'Increase the minimum password length.'
+    Ignore = $false
+})
+Assert-Equal $securityParameter.'Security status' 'Risk' 'Security Dashboard status conversion failed'
+Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'CRITICAL' 'An unignored Security Dashboard risk must be critical'
+$securityParameter.Ignored = $true
+Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'RECOMMENDED' 'An ignored Security Dashboard risk should be recommended'
 
 $server = Convert-ServerStatus ([PSCustomObject]@{
     Name = 'Server'
@@ -79,6 +95,7 @@ $assessmentData = [PSCustomObject]@{
     Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     EventLogs = @()
+    SecurityDashboard = @([PSCustomObject]@{ 'Security status' = 'Ok'; Ignored = $false })
 }
 $assessment = @(New-AssessmentSummary $assessmentData)
 $expectedSections = @(
@@ -93,7 +110,8 @@ Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'As
 Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
 Assert-Equal $assessment[5].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
 Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidence should be recommended'
-Assert-Equal (Get-OverallHealthScore $assessment) 65 'Overall health score calculation failed'
+Assert-Equal $assessment[11].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security assessment'
+Assert-Equal (Get-OverallHealthScore $assessment) 70 'Overall health score calculation failed'
 
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
