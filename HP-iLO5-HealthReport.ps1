@@ -193,7 +193,7 @@ function Get-RedfishCollection {
 
 function Add-CollectionNote {
     param(
-        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Notes,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Notes,
         [Parameter(Mandatory)][string]$Message
     )
     $Notes.Add($Message)
@@ -203,7 +203,7 @@ function Get-SafeCollection {
     param(
         [Parameter(Mandatory)][object]$Session,
         [AllowNull()][string]$Uri,
-        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Notes,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Notes,
         [string]$Label = 'resource',
         [int]$Limit = [int]::MaxValue
     )

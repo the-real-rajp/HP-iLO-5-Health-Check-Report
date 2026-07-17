@@ -45,6 +45,15 @@ if (-not (Get-Command New-IloSession).Parameters.ContainsKey('IgnoreCertificateE
     throw 'New-IloSession is missing the internal certificate-control parameter.'
 }
 
+$emptyNotes = [System.Collections.Generic.List[string]]::new()
+$emptyResult = @(Get-SafeCollection `
+    -Session ([PSCustomObject]@{}) `
+    -Uri $null `
+    -Notes $emptyNotes `
+    -Label 'test resource')
+Assert-Equal $emptyResult.Count 0 'Missing collection should return no records'
+Assert-Equal $emptyNotes.Count 1 'An empty notes collection did not accept a collection note'
+
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
     '/collection' = [PSCustomObject]@{
