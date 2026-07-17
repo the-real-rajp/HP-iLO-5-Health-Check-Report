@@ -80,11 +80,12 @@ function Resolve-RedfishUri {
 }
 
 function New-IloSession {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)][uri]$BaseUri,
         [Parameter(Mandatory)][PSCredential]$Credential,
         [Parameter(Mandatory)][int]$TimeoutSec,
-        [switch]$SkipCertificateCheck
+        [bool]$IgnoreCertificateErrors = $false
     )
 
     $body = @{
@@ -99,7 +100,12 @@ function New-IloSession {
         Headers = @{ Accept = 'application/json'; 'OData-Version' = '4.0' }
         Body = $body
         TimeoutSec = $TimeoutSec
-        SkipCertificateCheck = [bool]$SkipCertificateCheck
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $request.SkipCertificateCheck = $IgnoreCertificateErrors
+    }
+    else {
+        $request.UseBasicParsing = $true
     }
     $response = Invoke-WebRequest @request
     $token = $response.Headers['X-Auth-Token']
@@ -110,7 +116,7 @@ function New-IloSession {
         Headers = @{ Accept = 'application/json'; 'OData-Version' = '4.0'; 'X-Auth-Token' = $token }
         SessionUri = [string]$response.Headers['Location']
         TimeoutSec = $TimeoutSec
-        SkipCertificateCheck = [bool]$SkipCertificateCheck
+        IgnoreCertificateErrors = $IgnoreCertificateErrors
     }
 }
 
@@ -119,12 +125,19 @@ function Remove-IloSession {
 
     if (-not $Session.SessionUri) { return }
     try {
-        Invoke-WebRequest `
-            -Uri (Resolve-RedfishUri -BaseUri $Session.BaseUri -Uri $Session.SessionUri) `
-            -Method Delete `
-            -Headers $Session.Headers `
-            -TimeoutSec $Session.TimeoutSec `
-            -SkipCertificateCheck:$Session.SkipCertificateCheck | Out-Null
+        $request = @{
+            Uri = Resolve-RedfishUri -BaseUri $Session.BaseUri -Uri $Session.SessionUri
+            Method = 'Delete'
+            Headers = $Session.Headers
+            TimeoutSec = $Session.TimeoutSec
+        }
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $request.SkipCertificateCheck = [bool]$Session.IgnoreCertificateErrors
+        }
+        else {
+            $request.UseBasicParsing = $true
+        }
+        Invoke-WebRequest @request | Out-Null
     }
     catch {
         Write-Warning "Unable to close the Redfish session: $($_.Exception.Message)"
@@ -137,12 +150,16 @@ function Invoke-RedfishGet {
         [Parameter(Mandatory)][string]$Uri
     )
 
-    Invoke-RestMethod `
-        -Uri (Resolve-RedfishUri -BaseUri $Session.BaseUri -Uri $Uri) `
-        -Method Get `
-        -Headers $Session.Headers `
-        -TimeoutSec $Session.TimeoutSec `
-        -SkipCertificateCheck:$Session.SkipCertificateCheck
+    $request = @{
+        Uri = Resolve-RedfishUri -BaseUri $Session.BaseUri -Uri $Uri
+        Method = 'Get'
+        Headers = $Session.Headers
+        TimeoutSec = $Session.TimeoutSec
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $request.SkipCertificateCheck = [bool]$Session.IgnoreCertificateErrors
+    }
+    Invoke-RestMethod @request
 }
 
 function Get-RedfishCollection {
@@ -544,7 +561,7 @@ function New-WordHealthReport {
         [Parameter(Mandatory)][string]$OutputPath
     )
 
-    if (-not $IsWindows) { throw 'Microsoft Word report generation requires Windows.' }
+    if ($env:OS -ne 'Windows_NT') { throw 'Microsoft Word report generation requires Windows.' }
     $word = $null
     $document = $null
     try {
@@ -648,15 +665,39 @@ function Invoke-IloHealthReport {
     }
 
     $session = $null
+    $previousCertificateCallback = $null
+    $certificateCallbackChanged = $false
+    $previousSecurityProtocol = $null
+    $securityProtocolChanged = $false
     try {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+            [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            $securityProtocolChanged = $true
+            if ($SkipCertificateCheck) {
+                $previousCertificateCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
+                [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                $certificateCallbackChanged = $true
+            }
+        }
         Write-Host "Connecting to $($baseUri.AbsoluteUri.TrimEnd('/')) ..."
-        $session = New-IloSession $baseUri $Credential $TimeoutSec -SkipCertificateCheck:$SkipCertificateCheck
+        $session = New-IloSession `
+            -BaseUri $baseUri `
+            -Credential $Credential `
+            -TimeoutSec $TimeoutSec `
+            -IgnoreCertificateErrors ([bool]$SkipCertificateCheck)
         $data = Get-IloHealthData $session $MaxLogEntries
         $reportPath = New-WordHealthReport $data $OutputPath
         Write-Host "Word report created: $reportPath" -ForegroundColor Green
     }
     finally {
         if ($null -ne $session) { Remove-IloSession $session }
+        if ($certificateCallbackChanged) {
+            [Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
+        }
+        if ($securityProtocolChanged) {
+            [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+        }
     }
 }
 

@@ -41,6 +41,9 @@ $server = Convert-ServerStatus ([PSCustomObject]@{
 })
 Assert-Equal $server.Health 'Warning' 'Server health conversion failed'
 Assert-Equal $server.Model 'ProLiant DL380 Gen10' 'Server model conversion failed'
+if (-not (Get-Command New-IloSession).Parameters.ContainsKey('IgnoreCertificateErrors')) {
+    throw 'New-IloSession is missing the internal certificate-control parameter.'
+}
 
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
@@ -65,6 +68,36 @@ try {
 }
 finally {
     Set-Item function:Invoke-RedfishGet $originalRedfishGet
+}
+
+$originalNewSession = ${function:New-IloSession}
+$originalGetHealthData = ${function:Get-IloHealthData}
+$originalNewReport = ${function:New-WordHealthReport}
+$originalRemoveSession = ${function:Remove-IloSession}
+$script:ignoreCertificateErrorsObserved = $false
+function New-IloSession {
+    param($BaseUri, $Credential, $TimeoutSec, [bool]$IgnoreCertificateErrors)
+    $script:ignoreCertificateErrorsObserved = $IgnoreCertificateErrors
+    return [PSCustomObject]@{ BaseUri = $BaseUri; SessionUri = $null }
+}
+function Get-IloHealthData { param($Session, $MaxLogEntries); return [PSCustomObject]@{} }
+function New-WordHealthReport { param($Data, $OutputPath); return $OutputPath }
+function Remove-IloSession { param($Session) }
+try {
+    $password = ConvertTo-SecureString 'smoke-test-only' -AsPlainText -Force
+    $credential = [PSCredential]::new('test-user', $password)
+    Invoke-IloHealthReport `
+        -IloAddress '192.0.2.10' `
+        -Credential $credential `
+        -OutputPath 'smoke-test.docx' `
+        -SkipCertificateCheck
+    Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
+}
+finally {
+    Set-Item function:New-IloSession $originalNewSession
+    Set-Item function:Get-IloHealthData $originalGetHealthData
+    Set-Item function:New-WordHealthReport $originalNewReport
+    Set-Item function:Remove-IloSession $originalRemoveSession
 }
 
 Write-Host 'All PowerShell smoke tests passed.' -ForegroundColor Green

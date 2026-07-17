@@ -22,7 +22,7 @@ manager identifier.
 ## Requirements
 
 - Windows 10, Windows 11, or Windows Server
-- PowerShell 7.3 or newer
+- Windows PowerShell 5.1 or PowerShell 7
 - Desktop Microsoft Word (used to create the `.docx` report)
 - HTTPS network access to the iLO management interface
 - An iLO account with read access to the requested Redfish resources
@@ -74,7 +74,7 @@ Certificate verification remains enabled by default. Other options:
 
 ## Validation
 
-Run the cross-platform smoke tests with PowerShell 7:
+Run the smoke tests with PowerShell:
 
 ```powershell
 pwsh -NoProfile -File ./tests/Smoke.Tests.ps1
@@ -87,4 +87,3 @@ contacting an iLO or starting Microsoft Word.
 
 - [HPE iLO 5 Redfish API reference](https://hewlettpackard.github.io/ilo-rest-api-docs/ilo5/)
 - [DMTF Redfish standard](https://www.dmtf.org/standards/redfish)
-
