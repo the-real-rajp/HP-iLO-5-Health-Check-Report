@@ -36,6 +36,7 @@ $script:WdFieldNumPages = 26
 $script:WdFieldPage = 33
 $script:WdBorderTop = -1
 $script:WdBorderBottom = -3
+$script:WdPreferredWidthPoints = 3
 $script:ReportBlue = '005F9E'
 $script:ReportDark = '404040'
 $script:ReportStripe = 'F2F7FB'
@@ -171,11 +172,22 @@ function Invoke-RedfishGet {
         Method = 'Get'
         Headers = $Session.Headers
         TimeoutSec = $Session.TimeoutSec
+        DisableKeepAlive = $true
     }
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         $request.SkipCertificateCheck = [bool]$Session.IgnoreCertificateErrors
     }
-    Invoke-RestMethod @request
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            return Invoke-RestMethod @request
+        }
+        catch {
+            $transient = $_.Exception.Message -match '(?i)underlying connection was closed|unexpected error occurred on a send|connection reset|forcibly closed|temporarily unavailable|timed out'
+            if (-not $transient -or $attempt -eq 3) { throw }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
 }
 
 function Get-RedfishCollection {
@@ -212,7 +224,38 @@ function Add-CollectionNote {
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Notes,
         [Parameter(Mandatory)][string]$Message
     )
-    $Notes.Add($Message)
+    if (-not $Notes.Contains($Message)) {
+        $Notes.Add($Message)
+    }
+}
+
+function Get-SafeCollectionFromUris {
+    param(
+        [Parameter(Mandatory)][object]$Session,
+        [AllowEmptyCollection()][string[]]$Uris,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Notes,
+        [string]$Label = 'resource',
+        [int]$Limit = [int]::MaxValue
+    )
+
+    $candidates = @($Uris | Where-Object { $_ } | Select-Object -Unique)
+    if ($candidates.Count -eq 0) {
+        Add-CollectionNote -Notes $Notes -Message "$Label is not advertised by this system."
+        return @()
+    }
+
+    $lastError = $null
+    foreach ($uri in $candidates) {
+        try {
+            return @(Get-RedfishCollection -Session $Session -Uri $uri -Limit $Limit)
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+
+    Add-CollectionNote -Notes $Notes -Message "Unable to collect $Label`: $lastError"
+    return @()
 }
 
 function Get-SafeCollection {
@@ -297,6 +340,14 @@ function Convert-Memory {
     }
 }
 
+function Test-ReportRecordPresent {
+    param([AllowNull()][object]$Record)
+
+    if ($null -eq $Record) { return $false }
+    $state = Get-ObjectProperty -InputObject $Record -Name 'State' -Default ''
+    return ([string]$state -notmatch '(?i)^absent$')
+}
+
 function Convert-Processor {
     param([Parameter(Mandatory)][object]$Item)
     [PSCustomObject][ordered]@{
@@ -363,7 +414,9 @@ function Get-IloHealthData {
         if (-not $powerUri -and $chassisUri) { $powerUri = "$($chassisUri.TrimEnd('/'))/Power" }
         try {
             $thermal = Invoke-RedfishGet $Session $thermalUri
-            $temperatures = @(@(Get-ObjectProperty $thermal 'Temperatures' @()) | ForEach-Object { Convert-Temperature $_ })
+            $temperatures = @(@(Get-ObjectProperty $thermal 'Temperatures' @()) |
+                ForEach-Object { Convert-Temperature $_ } |
+                Where-Object { Test-ReportRecordPresent $_ })
             $fans = @(@(Get-ObjectProperty $thermal 'Fans' @()) | ForEach-Object { Convert-Fan $_ })
         }
         catch { Add-CollectionNote $notes "Unable to collect thermal data: $($_.Exception.Message)" }
@@ -374,11 +427,16 @@ function Get-IloHealthData {
         catch { Add-CollectionNote $notes "Unable to collect power data: $($_.Exception.Message)" }
     }
 
-    $memory = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Memory') $notes 'memory') | ForEach-Object { Convert-Memory $_ })
+    $memory = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Memory') $notes 'memory') |
+        ForEach-Object { Convert-Memory $_ } |
+        Where-Object { Test-ReportRecordPresent $_ })
     $processors = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Processors') $notes 'processors') | ForEach-Object { Convert-Processor $_ })
 
     $storage = [System.Collections.Generic.List[object]]::new()
-    foreach ($item in @(Get-SafeCollection $Session (Get-RedfishLink $system 'Storage') $notes 'storage')) {
+    $systemUri = Get-ObjectProperty $system '@odata.id'
+    $standardStorageUri = if ($systemUri) { "$($systemUri.TrimEnd('/'))/Storage" } else { $null }
+    $storageUris = @($standardStorageUri, (Get-RedfishLink $system 'Storage'))
+    foreach ($item in @(Get-SafeCollectionFromUris $Session $storageUris $notes 'storage')) {
         $storage.Add([PSCustomObject][ordered]@{
             'Name' = Get-ObjectProperty $item 'Name' (Get-ObjectProperty $item 'Id' 'Unknown')
             'Description' = Get-ObjectProperty $item 'Description' ''
@@ -422,11 +480,27 @@ function Get-IloHealthData {
     catch { Add-CollectionNote $notes "Unable to collect firmware inventory: $($_.Exception.Message)" }
 
     $eventLogs = [System.Collections.Generic.List[object]]::new()
+    $logServiceUris = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($owner in @($system) + $managers) {
-        foreach ($service in @(Get-SafeCollection $Session (Get-RedfishLink $owner 'LogServices') $notes 'log services')) {
-            $logName = Get-ObjectProperty $service 'Name' (Get-ObjectProperty $service 'Id' 'Event log')
-            foreach ($entry in @(Get-SafeCollection $Session (Get-RedfishLink $service 'Entries') $notes "$logName entries" $MaxLogEntries)) {
-                $eventLogs.Add((Convert-LogEntry $entry $logName))
+        $ownerUri = Get-ObjectProperty $owner '@odata.id'
+        $advertisedLogUri = Get-RedfishLink $owner 'LogServices'
+        if ($advertisedLogUri) {
+            [void]$logServiceUris.Add($advertisedLogUri)
+        }
+        elseif ($ownerUri) {
+            [void]$logServiceUris.Add("$($ownerUri.TrimEnd('/'))/LogServices")
+        }
+    }
+    if ($logServiceUris.Count -eq 0) {
+        Add-CollectionNote $notes 'Log services are not advertised by this system.'
+    }
+    else {
+        foreach ($logServiceUri in $logServiceUris) {
+            foreach ($service in @(Get-SafeCollection $Session $logServiceUri $notes 'log services')) {
+                $logName = Get-ObjectProperty $service 'Name' (Get-ObjectProperty $service 'Id' 'Event log')
+                foreach ($entry in @(Get-SafeCollection $Session (Get-RedfishLink $service 'Entries') $notes "$logName entries" $MaxLogEntries)) {
+                    $eventLogs.Add((Convert-LogEntry $entry $logName))
+                }
             }
         }
     }
@@ -478,7 +552,20 @@ function Get-AssessmentStatus {
     param([AllowEmptyCollection()][object[]]$Items)
 
     if (@($Items).Count -eq 0) { return 'RECOMMENDED' }
-    $evidence = ($Items | ConvertTo-Json -Depth 8 -Compress) -join ' '
+    $signals = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $Items) {
+        foreach ($name in @('Health', 'HealthRollup', 'State', 'Severity')) {
+            $value = if ($item -is [Collections.IDictionary] -and $item.Contains($name)) {
+                $item[$name]
+            }
+            else {
+                Get-ObjectProperty -InputObject $item -Name $name
+            }
+            if ($null -ne $value) { $signals.Add([string]$value) }
+        }
+    }
+    if ($signals.Count -eq 0) { return 'RECOMMENDED' }
+    $evidence = $signals -join ' '
     if ($evidence -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
     if ($evidence -match '(?i)warning|degraded|caution|unknown|disabled') { return 'RECOMMENDED' }
     return 'HEALTHY'
@@ -593,7 +680,7 @@ function Add-WordTable {
     $table = $Document.Tables.Add($range, $Records.Count + 1, $properties.Count)
     $table.Style = 'Table Grid'
     $table.AllowAutoFit = $false
-    $table.PreferredWidthType = 2
+    $table.PreferredWidthType = $script:WdPreferredWidthPoints
     $table.PreferredWidth = 540
     $table.Rows.Item(1).HeadingFormat = -1
 
@@ -651,7 +738,7 @@ function Add-AssessmentSummaryTable {
     $table = $Document.Tables.Add($range, 8, 4)
     $table.Style = 'Table Grid'
     $table.AllowAutoFit = $false
-    $table.PreferredWidthType = 2
+    $table.PreferredWidthType = $script:WdPreferredWidthPoints
     $table.PreferredWidth = 540
     $widths = @(175, 95, 175, 95)
     for ($column = 1; $column -le 4; $column++) {
@@ -715,7 +802,7 @@ function Add-OverallHealthScore {
     $table = $Document.Tables.Add($range, 1, 2)
     $table.Style = 'Table Grid'
     $table.AllowAutoFit = $false
-    $table.PreferredWidthType = 2
+    $table.PreferredWidthType = $script:WdPreferredWidthPoints
     $table.PreferredWidth = 540
     $table.Columns.Item(1).Width = 180
     $table.Columns.Item(2).Width = 360
@@ -775,12 +862,15 @@ function Set-WordReportFurniture {
     $footer.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
     $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Italic = -1
     $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Color = ConvertTo-WordColor '888888'
-    $footer.Collapse(0)
-    $footer.Fields.Add($footer, $script:WdFieldPage) | Out-Null
-    $footer.Collapse(0)
-    $footer.InsertAfter(' of ')
-    $footer.Collapse(0)
-    $footer.Fields.Add($footer, $script:WdFieldNumPages) | Out-Null
+    $pageRange = $Section.Footers.Item(1).Range.Duplicate
+    $pageRange.SetRange($pageRange.End - 1, $pageRange.End - 1)
+    $pageRange.Fields.Add($pageRange, $script:WdFieldPage) | Out-Null
+    $suffixRange = $Section.Footers.Item(1).Range.Duplicate
+    $suffixRange.SetRange($suffixRange.End - 1, $suffixRange.End - 1)
+    $suffixRange.InsertAfter(' of ')
+    $totalRange = $Section.Footers.Item(1).Range.Duplicate
+    $totalRange.SetRange($totalRange.End - 1, $totalRange.End - 1)
+    $totalRange.Fields.Add($totalRange, $script:WdFieldNumPages) | Out-Null
     $footerBorder = $Section.Footers.Item(1).Range.Paragraphs.Item(1).Borders.Item($script:WdBorderTop)
     $footerBorder.LineStyle = 1
     $footerBorder.LineWidth = 4
@@ -865,7 +955,7 @@ function New-WordHealthReport {
             @('Power & Thermal - Temperatures', 'Temperatures'),
             @('Power & Thermal - Fans', 'Fans'),
             @('Power & Thermal - Power Supplies', 'PowerSupplies'),
-            @('Storage', 'Storage'),
+            @('Storage Controllers, Drives & Volumes', 'Storage'),
             @('Memory', 'Memory'),
             @('Processors', 'Processors'),
             @('Firmware & OS Software', 'Firmware'),
@@ -873,9 +963,10 @@ function New-WordHealthReport {
             @('Administration - Event Logs', 'EventLogs')
         )
         foreach ($item in $sections) {
+            $records = @($Data.PSObject.Properties[$item[1]].Value | Where-Object { Test-ReportRecordPresent $_ })
+            if ($records.Count -eq 0) { continue }
             Add-WordHeading $document $item[0] 2
-            $records = @($Data.PSObject.Properties[$item[1]].Value)
-            Add-WordTable $document $records "No $($item[0].ToLowerInvariant()) data was returned."
+            Add-WordTable $document $records 'No records were returned.'
         }
 
         if (@($Data.CollectionNotes).Count -gt 0) {
@@ -888,6 +979,8 @@ function New-WordHealthReport {
         $resolved = [IO.Path]::GetFullPath($OutputPath)
         $directory = Split-Path -Parent $resolved
         if (-not (Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+        $document.Fields.Update() | Out-Null
+        $section.Footers.Item(1).Range.Fields.Update() | Out-Null
         $document.SaveAs2($resolved, 16)
         return $resolved
     }

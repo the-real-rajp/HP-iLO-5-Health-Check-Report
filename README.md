@@ -14,10 +14,13 @@ The report covers:
 - processors
 - firmware
 - Integrated Management Log, iLO Event Log, and other advertised log services
+- empty detail sections and hardware records reported as `Absent` are omitted
+- transient iLO connection failures are retried and duplicate notes are suppressed
 
 The Word output follows a two-part health-assessment format: a branded cover
 page followed by an Executive Overview, fourteen-section Assessment Summary,
-overall health score, and detailed evidence tables.
+overall health score, and detailed evidence tables. Storage evidence represents
+controllers, physical drives, and logical volumes when iLO advertises them.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or
