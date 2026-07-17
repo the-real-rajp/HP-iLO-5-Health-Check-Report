@@ -97,6 +97,7 @@ Assert-Equal (Get-OverallHealthScore $assessment) 65 'Overall health score calcu
 
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
+    '/empty-collection' = [PSCustomObject]@{ Members = @() }
     '/collection' = [PSCustomObject]@{
         Members = @([PSCustomObject]@{ '@odata.id' = '/items/1' })
         'Members@odata.nextLink' = '/collection?page=2'
@@ -124,6 +125,12 @@ try {
         -Label 'storage')
     Assert-Equal $fallbackMembers.Count 2 'Collection URI fallback failed'
     Assert-Equal $fallbackNotes.Count 0 'Successful fallback should not leave a collection error note'
+    $emptyFallbackMembers = @(Get-SafeCollectionFromUris `
+        -Session ([PSCustomObject]@{}) `
+        -Uris @('/empty-collection', '/collection') `
+        -Notes $fallbackNotes `
+        -Label 'systems')
+    Assert-Equal $emptyFallbackMembers.Count 2 'An empty collection should not prevent endpoint fallback'
 }
 finally {
     Set-Item function:Invoke-RedfishGet $originalRedfishGet
