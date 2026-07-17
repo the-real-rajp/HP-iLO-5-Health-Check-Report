@@ -1,7 +1,9 @@
 # HP iLO 5 Health Check Report
 
-Generate a Microsoft Word health report for an HPE iLO 5 server through its
-Redfish API. The report covers:
+Generate a Microsoft Word health report for an HPE iLO 5 server with
+PowerShell and the Redfish API.
+
+The report covers:
 
 - server status
 - temperatures
@@ -11,84 +13,78 @@ Redfish API. The report covers:
 - memory
 - processors
 - firmware
-- Integrated Management Log and other available system event logs
+- Integrated Management Log, iLO Event Log, and other advertised log services
 
-The tool discovers Redfish resource links instead of assuming that every iLO
-uses the same system or chassis identifier.
+The script starts at `/redfish/v1/` and follows the links advertised by iLO,
+so it does not assume that every server uses the same system, chassis, or
+manager identifier.
 
 ## Requirements
 
-- Python 3.13 or newer (designed for Python 3.13.14)
-- Network access to the iLO management interface over HTTPS
+- Windows 10, Windows 11, or Windows Server
+- PowerShell 7.3 or newer
+- Desktop Microsoft Word (used to create the `.docx` report)
+- HTTPS network access to the iLO management interface
 - An iLO account with read access to the requested Redfish resources
 
-## Install
-
-```bash
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-```
-
-For development and tests:
-
-```bash
-python -m pip install -e '.[dev]'
-pytest
-```
+No extra PowerShell modules are required.
 
 ## Run
 
-Run without a host argument to be prompted for an IP address or FQDN:
+Open PowerShell in the repository directory:
 
-```bash
-ilo-health-report
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./HP-iLO5-HealthReport.ps1
 ```
 
-Or provide it directly:
+The script prompts for an iLO IP address or FQDN and then displays the standard
+Windows credential prompt. The password is not echoed or saved in the report.
 
-```bash
-ilo-health-report --host ilo.example.com
+Parameters can also be supplied directly:
+
+```powershell
+./HP-iLO5-HealthReport.ps1 `
+    -IloAddress 'ilo.example.com' `
+    -OutputPath '.\reports\server-01-health.docx'
 ```
 
-The username and password are requested securely at the terminal. The tool
-creates a Redfish session and does not save credentials in the report.
+For an iLO with a self-signed certificate in a trusted lab:
 
-By default, HTTPS certificates are verified. For an iLO with a self-signed
-certificate in a trusted lab, verification can be disabled explicitly:
-
-```bash
-ilo-health-report --host 192.0.2.10 --insecure
+```powershell
+./HP-iLO5-HealthReport.ps1 -IloAddress '192.0.2.10' -SkipCertificateCheck
 ```
 
-Other useful options:
+Certificate verification remains enabled by default. Other options:
 
 ```text
---output PATH         Destination .docx path
---timeout SECONDS     Per-request timeout (default: 30)
---max-log-entries N   Maximum entries per event log (default: 100)
+-Credential            PSCredential to use instead of prompting
+-TimeoutSec             Per-request timeout; default 30
+-MaxLogEntries          Maximum entries collected from each log; default 100
+-SkipCertificateCheck   Disable TLS validation for a trusted lab only
 ```
 
 ## Security notes
 
 - Prefer a dedicated, least-privilege iLO account.
-- Keep certificate verification enabled in production.
-- Do not put credentials in command-line arguments, source files, or inventory
-  files. Passwords supplied at the prompt are not echoed.
-- The report may contain serial numbers, firmware versions, hostnames, and log
-  messages. Handle it as operationally sensitive data.
+- Keep certificate validation enabled in production.
+- Do not place passwords in scripts, command history, or source control.
+- Reports can contain hostnames, serial numbers, firmware versions, and event
+  messages. Handle them as operationally sensitive data.
 
-## Redfish coverage
+## Validation
 
-The collector begins at `/redfish/v1/` and follows advertised links to systems,
-chassis, thermal, power, storage, memory, processors, firmware inventory, and
-log services. Availability varies by server model, installed hardware, iLO
-firmware, privileges, and storage-controller Redfish support. An unavailable
-resource is recorded in the report instead of aborting the entire collection.
+Run the cross-platform smoke tests with PowerShell 7:
 
-Official references:
+```powershell
+pwsh -NoProfile -File ./tests/Smoke.Tests.ps1
+```
+
+The smoke tests validate script parsing and pure data-shaping helpers without
+contacting an iLO or starting Microsoft Word.
+
+## References
 
 - [HPE iLO 5 Redfish API reference](https://hewlettpackard.github.io/ilo-rest-api-docs/ilo5/)
-- [DMTF Redfish schemas and specifications](https://www.dmtf.org/standards/redfish)
+- [DMTF Redfish standard](https://www.dmtf.org/standards/redfish)
 
