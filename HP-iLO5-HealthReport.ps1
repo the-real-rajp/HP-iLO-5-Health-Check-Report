@@ -172,7 +172,6 @@ function Invoke-RedfishGet {
         Method = 'Get'
         Headers = $Session.Headers
         TimeoutSec = $Session.TimeoutSec
-        DisableKeepAlive = $true
     }
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         $request.SkipCertificateCheck = [bool]$Session.IgnoreCertificateErrors
@@ -245,15 +244,19 @@ function Get-SafeCollectionFromUris {
     }
 
     $lastError = $null
+    $successfulEmptyResponse = $false
     foreach ($uri in $candidates) {
         try {
-            return @(Get-RedfishCollection -Session $Session -Uri $uri -Limit $Limit)
+            $result = @(Get-RedfishCollection -Session $Session -Uri $uri -Limit $Limit)
+            if ($result.Count -gt 0) { return $result }
+            $successfulEmptyResponse = $true
         }
         catch {
             $lastError = $_.Exception.Message
         }
     }
 
+    if ($successfulEmptyResponse) { return @() }
     Add-CollectionNote -Notes $Notes -Message "Unable to collect $Label`: $lastError"
     return @()
 }
@@ -396,11 +399,27 @@ function Get-IloHealthData {
 
     $notes = [System.Collections.Generic.List[string]]::new()
     $root = Invoke-RedfishGet -Session $Session -Uri '/redfish/v1/'
-    $systems = @(Get-SafeCollection $Session (Get-RedfishLink $root 'Systems') $notes 'systems')
-    if ($systems.Count -eq 0) { throw 'No ComputerSystem resource was found.' }
+    $systems = @(Get-SafeCollectionFromUris `
+        -Session $Session `
+        -Uris @((Get-RedfishLink $root 'Systems'), '/redfish/v1/Systems/', '/redfish/v1/Systems') `
+        -Notes $notes `
+        -Label 'systems')
+    if ($systems.Count -eq 0) {
+        $discoveryDetail = @($notes | Where-Object { $_ -match '(?i)systems' }) -join ' '
+        if (-not $discoveryDetail) { $discoveryDetail = 'The Systems collection returned no members.' }
+        throw "No ComputerSystem resource was found. $discoveryDetail"
+    }
     $system = $systems[0]
-    $chassis = @(Get-SafeCollection $Session (Get-RedfishLink $root 'Chassis') $notes 'chassis')
-    $managers = @(Get-SafeCollection $Session (Get-RedfishLink $root 'Managers') $notes 'managers')
+    $chassis = @(Get-SafeCollectionFromUris `
+        -Session $Session `
+        -Uris @((Get-RedfishLink $root 'Chassis'), '/redfish/v1/Chassis/', '/redfish/v1/Chassis') `
+        -Notes $notes `
+        -Label 'chassis')
+    $managers = @(Get-SafeCollectionFromUris `
+        -Session $Session `
+        -Uris @((Get-RedfishLink $root 'Managers'), '/redfish/v1/Managers/', '/redfish/v1/Managers') `
+        -Notes $notes `
+        -Label 'managers')
 
     $temperatures = @()
     $fans = @()
