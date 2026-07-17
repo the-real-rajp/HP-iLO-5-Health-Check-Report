@@ -15,6 +15,10 @@ The report covers:
 - firmware
 - Integrated Management Log, iLO Event Log, and other advertised log services
 
+The Word output follows a two-part health-assessment format: a branded cover
+page followed by an Executive Overview, fourteen-section Assessment Summary,
+overall health score, and detailed evidence tables.
+
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or
 manager identifier.
@@ -46,6 +50,7 @@ Parameters can also be supplied directly:
 ```powershell
 ./HP-iLO5-HealthReport.ps1 `
     -IloAddress 'ilo.example.com' `
+    -CustomerName 'Example Customer' `
     -OutputPath '.\reports\server-01-health.docx'
 ```
 
@@ -59,6 +64,7 @@ Certificate verification remains enabled by default. Other options:
 
 ```text
 -Credential            PSCredential to use instead of prompting
+-CustomerName          Customer name displayed in the cover, header, and overview
 -TimeoutSec             Per-request timeout; default 30
 -MaxLogEntries          Maximum entries collected from each log; default 100
 -SkipCertificateCheck   Disable TLS validation for a trusted lab only

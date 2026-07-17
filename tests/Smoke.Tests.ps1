@@ -13,6 +13,9 @@ if ($errors.Count -gt 0) {
 if ($script:WdPaperLetter -ne 2) {
     throw 'The Word Letter paper-size constant must be 2.'
 }
+if ($script:WdPageBreak -ne 7 -or $script:WdFieldPage -ne 33 -or $script:WdFieldNumPages -ne 26) {
+    throw 'One or more Word interop constants are incorrect.'
+}
 
 function Assert-Equal {
     param($Actual, $Expected, [string]$Message)
@@ -58,6 +61,31 @@ $emptyResult = @(Get-SafeCollection `
 Assert-Equal $emptyResult.Count 0 'Missing collection should return no records'
 Assert-Equal $emptyNotes.Count 1 'An empty notes collection did not accept a collection note'
 
+$assessmentData = [PSCustomObject]@{
+    ServerStatus = [ordered]@{ Health = 'OK'; State = 'Enabled' }
+    Temperatures = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Fans = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    PowerSupplies = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Memory = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    EventLogs = @()
+}
+$assessment = @(New-AssessmentSummary $assessmentData)
+$expectedSections = @(
+    'Information', 'System Information', 'Firmware & OS Software',
+    'iLO Federation', 'Remote Console & Media', 'Power & Thermal',
+    'Performance', 'iLO Dedicated Network Port', 'iLO Shared Network Port',
+    'Remote Support', 'Administration', 'Security', 'Management',
+    'Lifecycle Management'
+)
+Assert-Equal $assessment.Count 14 'Assessment summary row count is incorrect'
+Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'Assessment summary order is incorrect'
+Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
+Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidence should be recommended'
+Assert-Equal (Get-OverallHealthScore $assessment) 65 'Overall health score calculation failed'
+
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
     '/collection' = [PSCustomObject]@{
@@ -88,13 +116,18 @@ $originalGetHealthData = ${function:Get-IloHealthData}
 $originalNewReport = ${function:New-WordHealthReport}
 $originalRemoveSession = ${function:Remove-IloSession}
 $script:ignoreCertificateErrorsObserved = $false
+$script:customerNameObserved = $null
 function New-IloSession {
     param($BaseUri, $Credential, $TimeoutSec, [bool]$IgnoreCertificateErrors)
     $script:ignoreCertificateErrorsObserved = $IgnoreCertificateErrors
     return [PSCustomObject]@{ BaseUri = $BaseUri; SessionUri = $null }
 }
 function Get-IloHealthData { param($Session, $MaxLogEntries); return [PSCustomObject]@{} }
-function New-WordHealthReport { param($Data, $OutputPath); return $OutputPath }
+function New-WordHealthReport {
+    param($Data, $OutputPath, $CustomerName)
+    $script:customerNameObserved = $CustomerName
+    return $OutputPath
+}
 function Remove-IloSession { param($Session) }
 try {
     $password = ConvertTo-SecureString 'smoke-test-only' -AsPlainText -Force
@@ -102,9 +135,11 @@ try {
     Invoke-IloHealthReport `
         -IloAddress '192.0.2.10' `
         -Credential $credential `
+        -CustomerName 'Example Customer' `
         -OutputPath 'smoke-test.docx' `
         -SkipCertificateCheck
     Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
+    Assert-Equal $script:customerNameObserved 'Example Customer' 'Customer name forwarding failed'
 }
 finally {
     Set-Item function:New-IloSession $originalNewSession
