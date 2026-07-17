@@ -1,0 +1,831 @@
+$ErrorActionPreference = 'Stop'
+$scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'HP-iLO5-HealthReport.ps1'
+$sampleGeneratorPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\Generate-SampleReport.ps1'
+
+$tokens = $null
+$errors = $null
+[void][Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) {
+    throw "PowerShell parser errors: $($errors.Message -join '; ')"
+}
+
+$sampleTokens = $null
+$sampleErrors = $null
+[void][Management.Automation.Language.Parser]::ParseFile($sampleGeneratorPath, [ref]$sampleTokens, [ref]$sampleErrors)
+if ($sampleErrors.Count -gt 0) {
+    throw "Sample report generator parser errors: $($sampleErrors.Message -join '; ')"
+}
+
+. $scriptPath
+
+if ((Split-Path -Leaf $script:ReportLogoPath) -ne 'winslow-technology-group-logo.png') {
+    throw 'Bundled report logo filename is incorrect.'
+}
+if ((Split-Path -Leaf (Split-Path -Parent $script:ReportLogoPath)) -ne 'images') {
+    throw 'Bundled report logo directory is incorrect.'
+}
+$reportSource = Get-Content -LiteralPath $scriptPath -Raw
+if ($reportSource -notmatch [regex]::Escape('$pngSignature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)')) {
+    throw 'The report logo download must validate the PNG signature.'
+}
+if ([regex]::Matches($reportSource, '(?m)^\s*Clear-ReportLogoCache\s*$').Count -lt 2) {
+    throw 'Temporary downloaded report logos must be cleaned up after report creation.'
+}
+if ([regex]::Matches($reportSource, [regex]::Escape('Set-OpenXmlDocumentLayout -Path $resolved')).Count -lt 2) {
+    throw 'Both report writers must apply final Open XML table layout settings.'
+}
+if ($reportSource -notmatch [regex]::Escape('$footer.Font.Size = 8.5')) {
+    throw 'The Word report footer must use an 8.5-point font.'
+}
+
+if ($script:WdPaperLetter -ne 2) {
+    throw 'The Word Letter paper-size constant must be 2.'
+}
+if ($script:WdPageBreak -ne 7 -or $script:WdFieldPage -ne 33 -or $script:WdFieldNumPages -ne 26) {
+    throw 'One or more Word interop constants are incorrect.'
+}
+if ($script:WdPreferredWidthPoints -ne 3) {
+    throw 'The Word preferred-width type must use points.'
+}
+
+function Assert-Equal {
+    param($Actual, $Expected, [string]$Message)
+    if ($Actual -ne $Expected) { throw "$Message. Expected '$Expected'; got '$Actual'." }
+}
+
+$resource = [PSCustomObject]@{
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+    Memory = [PSCustomObject]@{ '@odata.id' = '/redfish/v1/Systems/1/Memory' }
+    Links = [PSCustomObject]@{
+        SecurityService = [PSCustomObject]@{ '@odata.id' = '/redfish/v1/Managers/1/SecurityService' }
+    }
+}
+Assert-Equal (Get-HealthValue $resource) 'OK' 'Health extraction failed'
+Assert-Equal (Get-StateValue $resource) 'Enabled' 'State extraction failed'
+Assert-Equal (Get-HeaderValue @{ 'X-Auth-Token' = [string[]]@('test-token') } 'X-Auth-Token') 'test-token' 'Array response header was not reduced to a scalar value'
+Assert-Equal (Get-HeaderValue @{ Location = '/redfish/v1/SessionService/Sessions/1' } 'Location') '/redfish/v1/SessionService/Sessions/1' 'Scalar response header extraction failed'
+Assert-Equal (Get-RedfishLink $resource 'Memory') '/redfish/v1/Systems/1/Memory' 'Link extraction failed'
+Assert-Equal (Get-RedfishLinkAny $resource 'SecurityService') '/redfish/v1/Managers/1/SecurityService' 'Nested link extraction failed'
+Assert-Equal (Resolve-RedfishUri ([uri]'https://ilo.example.com/') '/redfish/v1/') 'https://ilo.example.com/redfish/v1/' 'URI resolution failed'
+Assert-Equal (ConvertTo-WordColor '1F4E78') 7884319 'Word color conversion failed'
+
+$temperature = Convert-Temperature ([PSCustomObject]@{
+    Name = 'Ambient'
+    ReadingCelsius = 22
+    UpperThresholdCritical = 42
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+})
+Assert-Equal $temperature.Name 'Ambient' 'Temperature name conversion failed'
+Assert-Equal $temperature.Health 'OK' 'Temperature health conversion failed'
+Assert-Equal (Test-ReportRecordPresent $temperature) $true 'Enabled temperature should be included'
+$absentTemperature = [PSCustomObject]@{ Name = 'Unused sensor'; State = 'Absent' }
+Assert-Equal (Test-ReportRecordPresent $absentTemperature) $false 'Absent temperature should be excluded'
+
+$securityParameter = Convert-SecurityParameter ([PSCustomObject]@{
+    Name = 'Minimum password length'
+    SecurityStatus = 'Risk'
+    State = '8 characters'
+    RecommendedAction = 'Increase the minimum password length.'
+    Ignore = $false
+})
+Assert-Equal $securityParameter.'Security status' 'Risk' 'Security Dashboard status conversion failed'
+if ($securityParameter.PSObject.Properties.Name -contains 'Recommended action') {
+    throw 'Security Dashboard output should not contain Recommended action.'
+}
+if ($securityParameter.PSObject.Properties.Name -contains 'Ignored') {
+    throw 'Security Dashboard output should not contain an Ignored column.'
+}
+Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'CRITICAL' 'An unignored Security Dashboard risk must be critical'
+$ignoredSecurityParameter = Convert-SecurityParameter ([PSCustomObject]@{
+    Name = 'Ignored security setting'
+    SecurityStatus = 'Risk'
+    State = 'Enabled'
+    Ignore = $true
+})
+Assert-Equal $ignoredSecurityParameter.'Security status' 'Ignored' 'An ignored Security Dashboard item should display Ignored'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityParameter)) 'WARNING' 'An ignored Security Dashboard item should produce a warning'
+$ignoredSecurityOverview = Convert-SecurityDashboardOverview ([PSCustomObject]@{
+    OverallSecurityStatus = 'Ignored'
+    ServerConfigurationLockStatus = 'Disabled'
+})
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview)) 'WARNING' 'Ignored Overall Security Status should produce a warning'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview, $securityParameter)) 'CRITICAL' 'A Security Dashboard risk must remain critical when the overall status is ignored'
+
+$firmwareRecord = Convert-Firmware ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Version = '3.10'
+    Updateable = $true
+})
+if ($firmwareRecord.PSObject.Properties.Name -contains 'State') {
+    throw 'Firmware report output should not contain State.'
+}
+if ($firmwareRecord.PSObject.Properties.Name -contains 'Updateable') {
+    throw 'Firmware report output should not contain Updateable.'
+}
+Assert-Equal $firmwareRecord.Health 'OK' 'Firmware without an advertised health value should display OK'
+
+$sharedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
+    Name = 'Manager Shared Network Interface'
+    InterfaceEnabled = $true
+    LinkStatus = 'LinkUp'
+    MACAddress = '00:11:22:33:44:55'
+    PermanentMACAddress = '00:11:22:33:44:55'
+    IPv4Addresses = @([PSCustomObject]@{
+        Address = '192.0.2.20'
+        AddressOrigin = 'Static'
+        SubnetMask = '255.255.255.0'
+        Gateway = '192.0.2.1'
+    })
+    Status = [PSCustomObject]@{ Health = 'OK' }
+    Oem = [PSCustomObject]@{
+        Hpe = [PSCustomObject]@{
+            InterfaceType = 'Shared'
+            SharedNetworkPortOptions = [PSCustomObject]@{ NIC = 'LOM'; Port = 1 }
+        }
+    }
+})
+Assert-Equal $sharedInterface.InterfaceType 'Shared' 'Shared iLO interface type conversion failed'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $sharedInterface.Rows) 'HEALTHY' 'Enabled shared iLO network interface should be healthy'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus @([PSCustomObject]@{ Setting = 'Configured for iLO'; Value = 'True' })) $null 'A configured NIC with no health evidence should not be assessed'
+Assert-Equal (@($sharedInterface.Rows | Where-Object Setting -eq 'Shared NIC')[0].Value) 'LOM' 'Shared NIC configuration was not collected'
+$dedicatedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
+    Name = 'Manager Dedicated Network Interface'
+    InterfaceEnabled = $false
+    LinkStatus = 'NoLink'
+    Status = [PSCustomObject]@{ Health = 'OK' }
+    Oem = [PSCustomObject]@{ Hpe = [PSCustomObject]@{ InterfaceType = 'Dedicated' } }
+})
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $dedicatedInterface.Rows) 'IGNORED' 'Unconfigured dedicated iLO NIC should be ignored'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $dedicatedInterface.Rows -OmitWhenUnconfigured) $null 'An unconfigured shared iLO NIC should be omitted'
+Assert-Equal (@($dedicatedInterface.Rows | Where-Object Setting -eq 'Assessment note')[0].Value) 'iLO is not configured to use this NIC.' 'Dedicated NIC ignore note is missing'
+
+$server = Convert-ServerStatus ([PSCustomObject]@{
+    Name = 'Server'
+    Model = 'ProLiant DL380 Gen10'
+    Status = [PSCustomObject]@{ HealthRollup = 'Warning' }
+})
+Assert-Equal $server.Health 'Warning' 'Server health conversion failed'
+Assert-Equal $server.'Product name' 'ProLiant DL380 Gen10' 'Server model conversion failed'
+
+$iloInformation = Convert-IloInformation ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Model = 'iLO 5'
+    ManagerType = 'BMC'
+    FirmwareVersion = '3.10'
+    DateTime = '2026-07-24T12:00:00Z'
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+})
+Assert-Equal $iloInformation.'Firmware version' '3.10' 'iLO firmware conversion failed'
+Assert-Equal $iloInformation.Health 'OK' 'iLO health conversion failed'
+if ($iloInformation.PSObject.Properties.Name -contains 'State') {
+    throw 'iLO report output should not contain State.'
+}
+
+$computeOps = Convert-ComputeOpsManagement ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Oem = [PSCustomObject]@{
+        Hpe = [PSCustomObject]@{
+            CloudConnect = [PSCustomObject]@{
+                ActivationKey = 'must-not-be-reported'
+                CloudConnectStatus = 'Connected'
+                WorkspaceId = 'workspace-123'
+                FailReason = 'None'
+            }
+        }
+    }
+})
+Assert-Equal $computeOps.'Connection status' 'Connected' 'Compute Ops Management status conversion failed'
+Assert-Equal $computeOps.'Workspace ID' 'workspace-123' 'Compute Ops Management workspace conversion failed'
+if ($computeOps.PSObject.Properties.Name -contains 'Failure reason') {
+    throw 'Compute Ops Management output should not contain Failure reason.'
+}
+if ($computeOps.PSObject.Properties.Name -contains 'Next retry time') {
+    throw 'Compute Ops Management output should not contain Next retry time.'
+}
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ 'Connection status' = 'ConnectionFailed' })) 'CRITICAL' 'Failed Compute Ops connection should be critical'
+if ($computeOps.PSObject.Properties.Name -contains 'Activation key' -or
+    (($computeOps.PSObject.Properties.Value | ForEach-Object { [string]$_ }) -join ' ') -match 'must-not-be-reported') {
+    throw 'Compute Ops Management output exposed the activation key.'
+}
+
+$systemNic = Convert-SystemNetworkInterface ([PSCustomObject]@{
+    Name = 'Embedded LOM 1'
+    MACAddress = '00:11:22:33:44:66'
+    LinkStatus = 'LinkUp'
+    SpeedMbps = 1000
+    IPv4Addresses = @([PSCustomObject]@{ Address = '192.0.2.30' })
+    Status = [PSCustomObject]@{ Health = 'OK' }
+})
+Assert-Equal $systemNic.'MAC address' '00:11:22:33:44:66' 'System network MAC conversion failed'
+Assert-Equal $systemNic.'IP address' '192.0.2.30' 'System network IP conversion failed'
+
+$deviceRecord = Convert-DeviceInventory ([PSCustomObject]@{
+    Name = 'Smart Array'
+    DeviceType = 'StorageController'
+    Location = 'Embedded RAID'
+    ProductVersion = 'B'
+    FirmwareVersion = '6.52'
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+})
+Assert-Equal $deviceRecord.Location 'Embedded RAID' 'Device inventory location conversion failed'
+Assert-Equal $deviceRecord.'Firmware version' '6.52' 'Device inventory firmware conversion failed'
+Assert-Equal $deviceRecord.Status 'OK' 'Device inventory status conversion failed'
+$percentFan = Convert-Fan ([PSCustomObject]@{ Name = 'Fan 2'; Reading = 23; ReadingUnits = 'Percent'; Status = [PSCustomObject]@{ Health = 'OK' } })
+Assert-Equal $percentFan.Reading '23%' 'Percent fan reading should include the percent symbol'
+if ($percentFan.PSObject.Properties.Name -contains 'Units') {
+    throw 'Fan report output should not contain Units.'
+}
+$processorRecord = Convert-Processor ([PSCustomObject]@{
+    Socket = 'CPU 1'
+    Model = 'Example Processor'
+    InstructionSet = 'x86-64'
+    Status = [PSCustomObject]@{ Health = 'OK' }
+})
+if ($processorRecord.PSObject.Properties.Name -contains 'Instruction set') {
+    throw 'Processor report output should not contain Instruction set.'
+}
+$notApplicableRowData = [PSCustomObject]@{
+    Memory = @(
+        [PSCustomObject][ordered]@{ Name = 'DIMM 1'; 'Capacity (MiB)' = 16384; Type = 'DDR4'; 'Speed (MHz)' = 2400; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'DIMM 2'; 'Capacity (MiB)' = 0; Type = 'N/A'; 'Speed (MHz)' = 'N/A'; Health = 'OK' }
+    )
+    SystemNetwork = @(
+        [PSCustomObject][ordered]@{ Name = 'vmnic0'; 'IP address' = '192.0.2.30'; Link = 'N/A'; 'Speed (Mbps)' = 'N/A'; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'vmnic1'; 'IP address' = 'N/A'; Link = 'N/A'; 'Speed (Mbps)' = 'N/A'; Health = 'OK' }
+    )
+    Temperatures = @(
+        [PSCustomObject][ordered]@{ Name = 'Ambient'; 'Reading (C)' = 22; 'Upper critical (C)' = 42; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'Unused sensor'; 'Reading (C)' = 0; 'Upper critical (C)' = 'N/A'; Health = 'OK' }
+    )
+}
+$memoryRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'Memory' -OmitNAValues -OmitRecordsWithNA)
+Assert-Equal $memoryRows.Count 1 'Memory rows containing N/A should be omitted'
+Assert-Equal $memoryRows[0].Name 'DIMM 1' 'The populated memory row should be retained'
+$networkRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'SystemNetwork' -OmitNAValues -OmitRecordsWithNA -KeepRecordsWithValuesIn @('IP address'))
+Assert-Equal $networkRows.Count 1 'Network rows without an IP address should be omitted when they contain N/A'
+Assert-Equal $networkRows[0].'IP address' '192.0.2.30' 'A network row with an IP address should be retained'
+$temperatureRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'Temperatures' -OmitNAValues -OmitRecordsWithNA)
+Assert-Equal $temperatureRows.Count 1 'Temperature rows containing N/A should be omitted'
+$absentDeviceData = [PSCustomObject]@{
+    DeviceInventory = @([PSCustomObject]@{ Location = 'Empty slot'; Status = 'Absent' })
+}
+Assert-Equal @(Get-ReportRecords -Data $absentDeviceData -PropertyName 'DeviceInventory').Count 0 'Absent device inventory records should be omitted'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Status = 'Absent' })) $null 'Absent device inventory records should not be assessed'
+
+foreach ($convertedRecord in @(
+    $temperature,
+    (Convert-Fan ([PSCustomObject]@{ Name = 'Fan 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-PowerSupply ([PSCustomObject]@{ Name = 'Power Supply 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-Memory ([PSCustomObject]@{ Name = 'DIMM 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-Processor ([PSCustomObject]@{ Name = 'CPU 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } }))
+)) {
+    if ($convertedRecord.PSObject.Properties.Name -contains 'State') {
+        throw 'Hardware detail output should not contain State.'
+    }
+}
+
+$remoteSupport = Convert-RemoteSupportRegistration ([PSCustomObject]@{
+    RemoteSupportEnabled = $true
+    ConnectModel = 'CentralConnect'
+    DestinationURL = 'https://remote-support.example'
+    LastTransmissionError = 'None'
+})
+Assert-Equal $remoteSupport.Registration 'Registered' 'Remote Support registration conversion failed'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @($remoteSupport)) 'HEALTHY' 'Registered Remote Support should be healthy'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @([PSCustomObject]@{ Registration = 'Not registered' })) 'RECOMMENDED' 'Unregistered Remote Support should be recommended'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @()) $null 'Uncollected Remote Support should not be assessed'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Health = 'Unknown'; State = 'Unknown' })) $null 'Unknown-only evidence should not be assessed'
+
+$unknownReportData = [PSCustomObject]@{
+    Example = @([PSCustomObject][ordered]@{ Name = 'Adapter 1'; Health = 'Unknown'; State = 'Enabled' })
+}
+$unknownReportRows = @(Get-ReportRecords -Data $unknownReportData -PropertyName 'Example')
+if ($unknownReportRows[0].PSObject.Properties.Name -contains 'Health') {
+    throw 'An all-Unknown report column should be omitted.'
+}
+$summaryReportData = [PSCustomObject]@{
+    ServerStatus = [ordered]@{
+        'Product name' = 'Example ProLiant'
+        Health = 'OK'
+    }
+}
+$summaryRows = @(Get-ReportRecords -Data $summaryReportData -PropertyName 'ServerStatus' -PropertyMap -ExcludeColumns @('Health'))
+Assert-Equal $summaryRows.Count 1 'Summary Health exclusion should retain the other server details'
+Assert-Equal $summaryRows[0].Item 'Product name' 'Summary Health exclusion returned the wrong detail'
+if ($summaryRows.Item -contains 'Health') {
+    throw 'The System Information Summary table must not contain Health.'
+}
+if (-not (Get-Command New-IloSession).Parameters.ContainsKey('IgnoreCertificateErrors')) {
+    throw 'New-IloSession is missing the internal certificate-control parameter.'
+}
+
+$emptyNotes = [System.Collections.Generic.List[string]]::new()
+$emptyResult = @(Get-SafeCollection `
+    -Session ([PSCustomObject]@{}) `
+    -Uri $null `
+    -Notes $emptyNotes `
+    -Label 'test resource')
+Assert-Equal $emptyResult.Count 0 'Missing collection should return no records'
+Assert-Equal $emptyNotes.Count 1 'An empty notes collection did not accept a collection note'
+Add-CollectionNote -Notes $emptyNotes -Message $emptyNotes[0]
+Assert-Equal $emptyNotes.Count 1 'Duplicate collection notes should be suppressed'
+
+$assessmentData = [PSCustomObject]@{
+    GeneratedAt = '2026-07-24T12:00:00Z'
+    ServerStatus = [ordered]@{ Health = 'OK'; State = 'Enabled' }
+    Temperatures = @([PSCustomObject]@{ 'Upper critical (C)' = 42; Health = 'OK'; State = 'Enabled' })
+    Fans = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    PowerSupplies = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Memory = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    ComputeOpsManagement = @([PSCustomObject]@{ 'Connection status' = 'NotEnabled' })
+    RemoteSupportRegistration = @([PSCustomObject]@{ Registration = 'Registered'; 'Last transmission error' = 'None' })
+    IloDedicatedNetworkPort = $dedicatedInterface.Rows
+    IloSharedNetworkPort = $sharedInterface.Rows
+    EventLogs = @(
+        [PSCustomObject]@{ Created = '2026-07-20T10:00:00Z'; Severity = 'Critical'; Log = 'Integrated Management Log'; Message = 'Recent critical event'; Repaired = $false }
+        [PSCustomObject]@{ Created = '2026-07-20T11:00:00Z'; Severity = 'Warning'; Log = 'Integrated Management Log'; Message = 'Recent warning event'; Repaired = $false }
+        [PSCustomObject]@{ Created = '2026-05-01T10:00:00Z'; Severity = 'Critical'; Log = 'Integrated Management Log'; Message = 'Old critical event'; Repaired = $false }
+    )
+    SecurityDashboard = @([PSCustomObject]@{ 'Security status' = 'Ok'; Ignored = $false })
+}
+$assessment = @(New-AssessmentSummary $assessmentData)
+$expectedSections = @(
+    'Information', 'System Information', 'Firmware & OS Software',
+    'Power & Thermal',
+    'Performance', 'iLO Dedicated Network Port', 'iLO Shared Network Port',
+    'Remote Support', 'Security Dashboard'
+)
+Assert-Equal $assessment.Count 9 'Assessment summary row count is incorrect'
+Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'Assessment summary order is incorrect'
+Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
+Assert-Equal $assessment[3].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
+Assert-Equal $assessment[5].Status 'IGNORED' 'Unconfigured dedicated iLO NIC assessment should be ignored'
+Assert-Equal $assessment[6].Status 'HEALTHY' 'Configured shared iLO NIC assessment should be healthy'
+Assert-Equal $assessment[7].Status 'HEALTHY' 'Registered Remote Support should be healthy'
+Assert-Equal $assessment[8].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security Dashboard assessment'
+$criticalRecentEvents = @(Get-CriticalRecentEventLogs $assessmentData)
+Assert-Equal $criticalRecentEvents.Count 1 'Event-log report filtering should retain only recent critical events'
+Assert-Equal $criticalRecentEvents[0].Message 'Recent critical event' 'The wrong event survived report filtering'
+$recommendedAction = Get-RecommendedActionText -Data $assessmentData -Assessment $assessment
+if ($recommendedAction -notmatch 'critical iLO event-log entries') {
+    throw 'Recommended Action did not include the recent critical event guidance.'
+}
+
+$nativeReportData = [PSCustomObject]@{
+    Target = 'https://192.0.2.10'
+    GeneratedAt = '2026-07-24T12:00:00Z'
+    ServerStatus = [ordered]@{
+        Name = 'Example ProLiant'
+        Model = 'ProLiant DL380 Gen10'
+        Health = 'OK'
+        State = 'Enabled'
+    }
+    IloInformation = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Model = 'iLO 5'
+        'Manager type' = 'BMC'
+        'Firmware version' = '3.10'
+        Health = 'OK'
+    })
+    StatusInformation = @([PSCustomObject][ordered]@{
+        Component = 'Server'
+        Health = 'OK'
+        State = 'Enabled'
+        Detail = 'Power: On'
+    })
+    ComputeOpsManagement = @([PSCustomObject][ordered]@{
+        Manager = 'iLO 5'
+        Supported = 'Yes'
+        'Connection status' = 'Connected'
+        'Workspace ID' = 'workspace-123'
+        'Next retry time' = 'N/A'
+    })
+    Temperatures = @([PSCustomObject][ordered]@{
+        Name = 'Ambient'
+        'Reading (C)' = 22
+        'Upper critical (C)' = 42
+        Health = 'OK'
+    })
+    Fans = @([PSCustomObject][ordered]@{
+        Name = 'Fan 1'
+        'Reading (%)' = 23
+        Health = 'OK'
+    })
+    PowerSupplies = @([PSCustomObject][ordered]@{
+        Name = 'Power Supply 1'
+        Model = 'Example PSU'
+        Health = 'OK'
+    })
+    Storage = @([PSCustomObject][ordered]@{
+        Type = 'Drive'
+        Name = 'Disk 1'
+        Capacity = '1.8 TB'
+        Health = 'OK'
+    })
+    Memory = @([PSCustomObject][ordered]@{
+        Name = 'DIMM 1'
+        Capacity = '32 GB'
+        Health = 'OK'
+    })
+    Processors = @([PSCustomObject][ordered]@{
+        Name = 'CPU 1'
+        Model = 'Example Processor'
+        Health = 'OK'
+    })
+    SystemNetwork = @([PSCustomObject][ordered]@{
+        Name = 'Embedded LOM 1'
+        Type = 'Ethernet interface'
+        'MAC address' = '00:11:22:33:44:66'
+        'IP address' = '192.0.2.30'
+        Link = 'LinkUp'
+        'Speed (Mbps)' = 1000
+        Health = 'OK'
+    })
+    DeviceInventory = @([PSCustomObject][ordered]@{
+        Location = 'Embedded RAID'
+        'Product name' = 'Smart Array'
+        'Product version' = 'Unknown'
+        'Firmware version' = '6.52'
+        Status = 'Enabled'
+    })
+    Firmware = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Version = '3.10'
+        Health = 'OK'
+    })
+    IloDedicatedNetworkPort = $dedicatedInterface.Rows
+    IloSharedNetworkPort = $sharedInterface.Rows
+    RemoteSupportRegistration = @([PSCustomObject][ordered]@{
+        Registration = 'Registered'
+        'Connection model' = 'CentralConnect'
+        Destination = 'https://remote-support.example'
+        'Last transmission error' = 'None'
+    })
+    Management = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Firmware = '3.10'
+        State = 'Enabled'
+    })
+    SecurityDashboard = @([PSCustomObject][ordered]@{
+        Name = 'Security State'
+        'Security status' = 'Ok'
+    })
+    EventLogs = @(
+        [PSCustomObject][ordered]@{
+            Created = '2026-07-24T10:00:00Z'
+            Severity = 'Critical'
+            Log = 'Integrated Management Log'
+            Message = 'Recent critical event for report validation.'
+            Repaired = $false
+        }
+        [PSCustomObject][ordered]@{
+            Created = '2026-07-23T10:00:00Z'
+            Severity = 'Warning'
+            Log = 'Integrated Management Log'
+            Message = 'Recent warning event that must be omitted.'
+            Repaired = $false
+        }
+        [PSCustomObject][ordered]@{
+            Created = '2026-05-01T10:00:00Z'
+            Severity = 'Critical'
+            Log = 'Integrated Management Log'
+            Message = 'Old critical event that must be omitted.'
+            Repaired = $false
+        }
+    )
+    CollectionNotes = @('Example report generated without Microsoft Word.')
+}
+$nativeReportPath = Join-Path ([IO.Path]::GetTempPath()) ('ilo-health-native-' + [guid]::NewGuid().ToString('N') + '.docx')
+$logoFallbackPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'images\winslow-technology-group-logo.png'
+try {
+    $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer' -LogoPath $logoFallbackPath
+    Assert-Equal $createdReport $nativeReportPath 'Native DOCX generator returned the wrong path'
+    if (-not (Test-Path $nativeReportPath)) { throw 'Native DOCX generator did not create a report.' }
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [IO.Compression.ZipFile]::OpenRead($nativeReportPath)
+    try {
+        $entryNames = @($zip.Entries.FullName)
+        foreach ($requiredEntry in @(
+            '[Content_Types].xml',
+            '_rels/.rels',
+            'word/document.xml',
+            'word/styles.xml',
+            'word/numbering.xml',
+            'word/header1.xml',
+            'word/footer1.xml',
+            'word/media/winslow-technology-group-logo.png'
+        )) {
+            if ($entryNames -notcontains $requiredEntry) {
+                throw "Native DOCX is missing $requiredEntry."
+            }
+        }
+        $documentEntry = $zip.GetEntry('word/document.xml')
+        $reader = New-Object IO.StreamReader($documentEntry.Open())
+        try { $documentText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        $documentText = $documentText -replace '\s+/>', '/>'
+        $footerEntry = $zip.GetEntry('word/footer1.xml')
+        $reader = New-Object IO.StreamReader($footerEntry.Open())
+        try { $footerText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        $footerText = $footerText -replace '\s+/>', '/>'
+        $headerEntry = $zip.GetEntry('word/header1.xml')
+        $reader = [IO.StreamReader]::new($headerEntry.Open(), [Text.Encoding]::UTF8, $true)
+        try { $headerText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        $stylesEntry = $zip.GetEntry('word/styles.xml')
+        $reader = New-Object IO.StreamReader($stylesEntry.Open())
+        try { $stylesText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        [xml]$documentXml = $documentText
+        $documentNamespaces = New-Object System.Xml.XmlNamespaceManager($documentXml.NameTable)
+        $documentNamespaces.AddNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        $summaryHeading = $documentXml.SelectSingleNode('//w:p[w:r/w:t="Summary"]', $documentNamespaces)
+        if ($null -eq $summaryHeading) { throw 'Native DOCX is missing the System Information Summary heading.' }
+        $summaryTable = $summaryHeading.SelectSingleNode('following-sibling::w:tbl[1]', $documentNamespaces)
+        if ($null -eq $summaryTable) { throw 'Native DOCX is missing the System Information Summary table.' }
+        $summaryTableText = (@($summaryTable.SelectNodes('.//w:t', $documentNamespaces) | ForEach-Object { $_.InnerText }) -join ' ')
+        if ($summaryTableText -match '(?i)\bHealth\b') {
+            throw 'Native DOCX System Information Summary must not contain Health.'
+        }
+        foreach ($expectedFooterText in @(
+            'Confidential',
+            "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved",
+            '<w:tab w:val="center" w:pos="5400"/>'
+        )) {
+            if ($footerText -notmatch [regex]::Escape($expectedFooterText)) {
+                throw "Native DOCX footer is missing expected text: $expectedFooterText."
+            }
+        }
+        if ([regex]::Matches($footerText, '<w:sz w:val="17"').Count -lt 4) {
+            throw 'Native DOCX footer runs must use the 8.5-point font size.'
+        }
+        foreach ($expectedLayoutText in @(
+            '<w:pgMar w:top="1080" w:right="720" w:bottom="720" w:left="720"',
+            '<w:tblLayout w:type="autofit"/>',
+            '<w:top w:w="60" w:type="dxa"/>',
+            '<w:bottom w:w="60" w:type="dxa"/>',
+            '<w:tcMar><w:left w:w="120" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>',
+            'w:color="CCCCCC"',
+            'w:fill="F2F7FB"',
+            'w:sz="1" w:color="CCCCCC"',
+            '<w:cantSplit/>'
+        )) {
+            if ($documentText -notmatch [regex]::Escape($expectedLayoutText)) {
+                throw "Native DOCX is missing expected layout setting: $expectedLayoutText."
+            }
+        }
+        foreach ($expectedStyleText in @(
+            '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>',
+            '<w:style w:type="paragraph" w:styleId="Heading1"',
+            '<w:style w:type="paragraph" w:styleId="Heading2"',
+            '<w:color w:val="404040"/>'
+        )) {
+            if ($stylesText -notmatch [regex]::Escape($expectedStyleText)) {
+                throw "Native DOCX styles are missing expected setting: $expectedStyleText."
+            }
+        }
+        $expectedHeaderText = "HP iLO Health Check $([char]0x2013) 192.0.2.10 $([char]0x2013) Example Customer"
+        foreach ($expectedHeaderValue in @(
+            $expectedHeaderText,
+            '<w:gridCol w:w="2300"/>',
+            '<w:gridCol w:w="8500"/>',
+            '<wp:extent cx="1333500" cy="409575"/>',
+            '<w:sz w:val="16"/>'
+        )) {
+            if ($headerText -notmatch [regex]::Escape($expectedHeaderValue)) {
+                throw "Native DOCX header is missing expected setting: $expectedHeaderValue."
+            }
+        }
+        foreach ($expectedText in @(
+            'Recommended Action',
+            'Health Check Status/Severity',
+            'Status / Severity',
+            'Guidance',
+            'Assessment Summary',
+            'Category',
+            'Severity',
+            'Information',
+            'Server',
+            'iLO',
+            'Status',
+            'HPE Compute Ops Management',
+            'Remote Support',
+            'Registration',
+            'Registered',
+            'Security Dashboard',
+            'System Information',
+            'Summary',
+            'Processors',
+            'Memory',
+            'Network',
+            'Device Inventory',
+            'Storage',
+            'Firmware &amp; OS Software',
+            'Power &amp; Thermal',
+            'Power Supply',
+            'Fans',
+            'Temperatures',
+            'Connected',
+            'Embedded LOM 1',
+            'Smart Array'
+        )) {
+            if ($documentText -notmatch [regex]::Escape($expectedText)) {
+                throw "Native DOCX is missing expected text: $expectedText."
+            }
+        }
+        if ($documentText -notmatch '<w:pageBreakBefore/>') {
+            throw 'Information should begin on a new page.'
+        }
+        foreach ($unexpectedText in @(
+            'Overall Health Score',
+            'Administration - Event Logs',
+            'Lifecycle Management',
+            '>Administration<',
+            '>Management<',
+            'Collection Notes',
+            'Failure reason',
+            'Updateable',
+            'Unknown',
+            'Recent critical event for report validation.',
+            'Recent warning event that must be omitted.',
+            'Old critical event that must be omitted.'
+        )) {
+            if ($documentText -match [regex]::Escape($unexpectedText)) {
+                throw "Native DOCX contains text that should have been omitted: $unexpectedText."
+            }
+        }
+        if ($documentText -match '>OK<') {
+            throw 'Native DOCX should display HEALTHY rather than OK for status values.'
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+finally {
+    Remove-Item $nativeReportPath -Force -ErrorAction SilentlyContinue
+}
+
+$sampleReportPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\sample-health-report.docx'
+if (-not (Test-Path -LiteralPath $sampleReportPath)) {
+    throw 'The checked-in sample report is missing.'
+}
+$zip = [IO.Compression.ZipFile]::OpenRead($sampleReportPath)
+try {
+    $documentEntry = $zip.GetEntry('word/document.xml')
+    $reader = New-Object IO.StreamReader($documentEntry.Open())
+    try { $sampleDocumentText = $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+    foreach ($expectedText in @(
+        'HP iLO Health Check',
+        'Health Check Status/Severity',
+        'Recommended Action',
+        'Assessment Summary',
+        'iLO Dedicated Network Port',
+        'HEALTHY',
+        'Embedded LOM 1'
+    )) {
+        if ($sampleDocumentText -notmatch [regex]::Escape($expectedText)) {
+            throw "Sample report is missing expected text: $expectedText."
+        }
+    }
+    foreach ($unexpectedText in @('Instruction set', '>OK<')) {
+        if ($sampleDocumentText -match [regex]::Escape($unexpectedText)) {
+            throw "Sample report contains text that should be omitted: $unexpectedText."
+        }
+    }
+}
+finally {
+    $zip.Dispose()
+}
+
+$originalRedfishGet = ${function:Invoke-RedfishGet}
+$script:fakeResponses = @{
+    '/empty-collection' = [PSCustomObject]@{ Members = @() }
+    '/collection' = [PSCustomObject]@{
+        Members = @([PSCustomObject]@{ '@odata.id' = '/items/1' })
+        'Members@odata.nextLink' = '/collection?page=2'
+    }
+    '/collection?page=2' = [PSCustomObject]@{
+        Members = @([PSCustomObject]@{ '@odata.id' = '/items/2' })
+    }
+    '/items/1' = [PSCustomObject]@{ Id = '1' }
+    '/items/2' = [PSCustomObject]@{ Id = '2' }
+}
+function Invoke-RedfishGet {
+    param($Session, [string]$Uri)
+    if ($Uri -eq '/bad-collection') { throw 'The remote server returned an error: (400) Bad Request.' }
+    return $script:fakeResponses[$Uri]
+}
+try {
+    $members = @(Get-RedfishCollection -Session ([PSCustomObject]@{}) -Uri '/collection')
+    Assert-Equal $members.Count 2 'Collection pagination failed'
+    Assert-Equal $members[1].Id '2' 'Second collection page was not read'
+    $fallbackNotes = [System.Collections.Generic.List[string]]::new()
+    $fallbackMembers = @(Get-SafeCollectionFromUris `
+        -Session ([PSCustomObject]@{}) `
+        -Uris @('/bad-collection', '/collection') `
+        -Notes $fallbackNotes `
+        -Label 'storage')
+    Assert-Equal $fallbackMembers.Count 2 'Collection URI fallback failed'
+    Assert-Equal $fallbackNotes.Count 0 'Successful fallback should not leave a collection error note'
+    $emptyFallbackMembers = @(Get-SafeCollectionFromUris `
+        -Session ([PSCustomObject]@{}) `
+        -Uris @('/empty-collection', '/collection') `
+        -Notes $fallbackNotes `
+        -Label 'systems')
+    Assert-Equal $emptyFallbackMembers.Count 2 'An empty collection should not prevent endpoint fallback'
+}
+finally {
+    Set-Item function:Invoke-RedfishGet $originalRedfishGet
+}
+
+$originalNewSession = ${function:New-IloSession}
+$originalGetHealthData = ${function:Get-IloHealthData}
+$originalNewReport = ${function:New-WordHealthReport}
+$originalRemoveSession = ${function:Remove-IloSession}
+$script:ignoreCertificateErrorsObserved = $false
+$script:customerNameObserved = $null
+$script:outputPathObserved = $null
+function New-IloSession {
+    param($BaseUri, $Credential, $TimeoutSec, [bool]$IgnoreCertificateErrors)
+    $script:ignoreCertificateErrorsObserved = $IgnoreCertificateErrors
+    return [PSCustomObject]@{ BaseUri = $BaseUri; SessionUri = $null }
+}
+function Get-IloHealthData { param($Session, $MaxLogEntries); return [PSCustomObject]@{} }
+function New-WordHealthReport {
+    param($Data, $OutputPath, $CustomerName)
+    $script:customerNameObserved = $CustomerName
+    $script:outputPathObserved = $OutputPath
+    return $OutputPath
+}
+function Remove-IloSession { param($Session) }
+$smokeLogPath = $null
+try {
+    $password = ConvertTo-SecureString 'smoke-test-only' -AsPlainText -Force
+    $credential = [PSCredential]::new('test-user', $password)
+    $smokeLogPath = Join-Path ([IO.Path]::GetTempPath()) 'HP-iLO5-HealthReport-smoke.log'
+    if (Test-Path -LiteralPath $smokeLogPath) { Remove-Item -LiteralPath $smokeLogPath -Force }
+    Invoke-IloHealthReport `
+        -IloAddress '192.0.2.10' `
+        -Credential $credential `
+        -CustomerName 'Example Customer' `
+        -OutputPath 'smoke-test.docx' `
+        -LogPath $smokeLogPath `
+        -SkipCertificateCheck
+    Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
+    Assert-Equal $script:customerNameObserved 'Example Customer' 'Customer name forwarding failed'
+    if (-not (Test-Path -LiteralPath $smokeLogPath)) { throw 'Health-check log was not created.' }
+    $smokeLog = Get-Content -LiteralPath $smokeLogPath -Raw
+    if ($smokeLog -notmatch 'Health check completed successfully') { throw 'Health-check log did not record successful completion.' }
+    if ($smokeLog -match 'smoke-test-only') { throw 'Health-check log must not contain the credential password.' }
+    Remove-Item -LiteralPath $smokeLogPath -Force
+
+    function Read-Host {
+        param([string]$Prompt)
+        if ($Prompt -eq 'Enter customer name') { return 'Prompted Customer' }
+        throw "Unexpected Read-Host prompt: $Prompt"
+    }
+    try {
+        Invoke-IloHealthReport `
+            -IloAddress '192.0.2.10' `
+            -Credential $credential `
+            -LogPath $smokeLogPath
+    }
+    finally {
+        Remove-Item function:Read-Host -Force
+    }
+    Assert-Equal $script:customerNameObserved 'Prompted Customer' 'Missing customer name should be prompted for'
+    Assert-Equal (Split-Path -Parent $script:outputPathObserved) (Split-Path -Parent $scriptPath) 'Default report path should use the script directory'
+    if ((Split-Path -Leaf $script:outputPathObserved) -ne 'iLO Health Check - Prompted Customer - 192.0.2.10.docx') {
+        throw "Default report filename is incorrect: $script:outputPathObserved"
+    }
+
+    $defaultLogPath = Get-DefaultReportLogPath -CustomerName 'Prompted Customer' -BaseUri ([uri]'https://192.0.2.10') -StartedAt ([datetime]'2026-07-27T14:30:45')
+    if ((Split-Path -Leaf $defaultLogPath) -ne 'iLO Health Check - Prompted Customer - 192.0.2.10 - 20260727-143045.log') {
+        throw "Default log filename is incorrect: $defaultLogPath"
+    }
+    if ((Split-Path -Leaf (Split-Path -Parent $defaultLogPath)) -ne 'logs') {
+        throw "Default log path must use the logs folder: $defaultLogPath"
+    }
+
+    Write-ReportProgress -Message 'System' -Indent 1 6>$null
+    $smokeLog = Get-Content -LiteralPath $smokeLogPath -Raw
+    if ($smokeLog -notmatch [regex]::Escape('  - System')) {
+        throw 'Indented collection progress was not written to the detailed log.'
+    }
+}
+finally {
+    if ($smokeLogPath -and (Test-Path -LiteralPath $smokeLogPath)) { Remove-Item -LiteralPath $smokeLogPath -Force }
+    Set-Item function:New-IloSession $originalNewSession
+    Set-Item function:Get-IloHealthData $originalGetHealthData
+    Set-Item function:New-WordHealthReport $originalNewReport
+    Set-Item function:Remove-IloSession $originalRemoveSession
+}
+
+Write-Host 'All PowerShell smoke tests passed.' -ForegroundColor Green
