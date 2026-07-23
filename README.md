@@ -14,6 +14,7 @@ The report covers:
 - processors
 - firmware
 - Integrated Management Log, iLO Event Log, and other advertised log services
+- iLO Security Dashboard overall status, risks, and recommended actions
 - empty detail sections and hardware records reported as `Absent` are omitted
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
