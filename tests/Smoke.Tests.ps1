@@ -115,6 +115,120 @@ Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidenc
 Assert-Equal $assessment[11].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security assessment'
 Assert-Equal (Get-OverallHealthScore $assessment) 70 'Overall health score calculation failed'
 
+$nativeReportData = [PSCustomObject]@{
+    Target = 'https://192.0.2.10'
+    GeneratedAt = Get-Date
+    ServerStatus = [ordered]@{
+        Name = 'Example ProLiant'
+        Model = 'ProLiant DL380 Gen10'
+        Health = 'OK'
+        State = 'Enabled'
+    }
+    Temperatures = @([PSCustomObject][ordered]@{
+        Name = 'Ambient'
+        'Reading (C)' = 22
+        'Upper critical (C)' = 42
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    Fans = @([PSCustomObject][ordered]@{
+        Name = 'Fan 1'
+        'Reading (%)' = 23
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    PowerSupplies = @([PSCustomObject][ordered]@{
+        Name = 'Power Supply 1'
+        Model = 'Example PSU'
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    Storage = @([PSCustomObject][ordered]@{
+        Type = 'Drive'
+        Name = 'Disk 1'
+        Capacity = '1.8 TB'
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    Memory = @([PSCustomObject][ordered]@{
+        Name = 'DIMM 1'
+        Capacity = '32 GB'
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    Processors = @([PSCustomObject][ordered]@{
+        Name = 'CPU 1'
+        Model = 'Example Processor'
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    Firmware = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Version = '3.10'
+        Updateable = $true
+    })
+    Management = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Firmware = '3.10'
+        State = 'Enabled'
+    })
+    SecurityDashboard = @([PSCustomObject][ordered]@{
+        Name = 'Security State'
+        'Security status' = 'Ok'
+        Ignored = $false
+        'Recommended action' = ''
+    })
+    EventLogs = @([PSCustomObject][ordered]@{
+        Created = '2026-07-24 10:00'
+        Severity = 'OK'
+        Log = 'Integrated Management Log'
+        Message = 'Example informational event.'
+        Repaired = $false
+    })
+    CollectionNotes = @('Example report generated without Microsoft Word.')
+}
+$nativeReportPath = Join-Path ([IO.Path]::GetTempPath()) ('ilo-health-native-' + [guid]::NewGuid().ToString('N') + '.docx')
+try {
+    $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer'
+    Assert-Equal $createdReport $nativeReportPath 'Native DOCX generator returned the wrong path'
+    if (-not (Test-Path $nativeReportPath)) { throw 'Native DOCX generator did not create a report.' }
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [IO.Compression.ZipFile]::OpenRead($nativeReportPath)
+    try {
+        $entryNames = @($zip.Entries.FullName)
+        foreach ($requiredEntry in @(
+            '[Content_Types].xml',
+            '_rels/.rels',
+            'word/document.xml',
+            'word/styles.xml',
+            'word/numbering.xml',
+            'word/header1.xml',
+            'word/footer1.xml'
+        )) {
+            if ($entryNames -notcontains $requiredEntry) {
+                throw "Native DOCX is missing $requiredEntry."
+            }
+        }
+        $documentEntry = $zip.GetEntry('word/document.xml')
+        $reader = New-Object IO.StreamReader($documentEntry.Open())
+        try { $documentText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        foreach ($expectedText in @('Assessment Summary', 'Overall Health Score', 'Security Dashboard')) {
+            if ($documentText -notmatch [regex]::Escape($expectedText)) {
+                throw "Native DOCX is missing expected text: $expectedText."
+            }
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+finally {
+    Remove-Item $nativeReportPath -Force -ErrorAction SilentlyContinue
+}
+
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
     '/empty-collection' = [PSCustomObject]@{ Members = @() }
