@@ -42,6 +42,7 @@ $script:ReportBlue = '005F9E'
 $script:ReportDark = '404040'
 $script:ReportStripe = 'F2F7FB'
 $script:ReportLogoPath = Join-Path $PSScriptRoot 'assets\winslowtg-logo.png'
+$script:ReportLogoUrl = 'https://winslowtg.com/wp-content/uploads/2022/07/logo-winslowtg@2x.png'
 
 function Get-ObjectProperty {
     param(
@@ -524,6 +525,37 @@ function Test-UnknownReportValue {
 
     if ($null -eq $Value) { return $true }
     return ([string]$Value).Trim() -match '(?i)^(unknown|absent)?$'
+}
+
+function Resolve-ReportLogoPath {
+    if (Test-Path $script:ReportLogoPath) { return $script:ReportLogoPath }
+
+    $logoDirectory = Split-Path -Parent $script:ReportLogoPath
+    if (-not (Test-Path $logoDirectory)) {
+        New-Item -ItemType Directory -Path $logoDirectory -Force | Out-Null
+    }
+
+    Write-Verbose "Downloading the WinslowTG logo from $script:ReportLogoUrl"
+    try {
+        $request = @{
+            Uri = $script:ReportLogoUrl
+            OutFile = $script:ReportLogoPath
+            ErrorAction = 'Stop'
+        }
+        if ($PSVersionTable.PSVersion.Major -lt 6) { $request.UseBasicParsing = $true }
+        Invoke-WebRequest @request
+        if (-not (Test-Path $script:ReportLogoPath) -or (Get-Item $script:ReportLogoPath).Length -eq 0) {
+            throw 'The download completed without a usable image file.'
+        }
+    }
+    catch {
+        if (Test-Path $script:ReportLogoPath) {
+            Remove-Item -LiteralPath $script:ReportLogoPath -Force -ErrorAction SilentlyContinue
+        }
+        throw "Unable to download the WinslowTG logo from $script:ReportLogoUrl. $($_.Exception.Message)"
+    }
+
+    return $script:ReportLogoPath
 }
 
 function Test-NotApplicableReportValue {
@@ -1397,9 +1429,7 @@ function Set-WordReportFurniture {
         [Parameter(Mandatory)][string]$ReportDate
     )
 
-    if (-not (Test-Path $script:ReportLogoPath)) {
-        throw "The WinslowTG logo is missing: $script:ReportLogoPath"
-    }
+    $logoPath = Resolve-ReportLogoPath
     $Section.PageSetup.DifferentFirstPageHeaderFooter = 0
     $Section.PageSetup.OddAndEvenPagesHeaderFooter = 0
 
@@ -1414,7 +1444,7 @@ function Set-WordReportFurniture {
         $header.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
         $logoRange = $header.Duplicate
         $logoRange.SetRange($header.Start, $header.Start)
-        [void]$header.InlineShapes.AddPicture($script:ReportLogoPath, $false, $true, $logoRange)
+        [void]$header.InlineShapes.AddPicture($logoPath, $false, $true, $logoRange)
         $headerBorder = $header.Paragraphs.Item(1).Borders.Item($script:WdBorderBottom)
         $headerBorder.LineStyle = 1
         $headerBorder.LineWidth = 4
@@ -1682,9 +1712,7 @@ function New-OpenXmlHealthReport {
     $resolved = [IO.Path]::GetFullPath($OutputPath)
     $directory = Split-Path -Parent $resolved
     if (-not (Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-    if (-not (Test-Path $script:ReportLogoPath)) {
-        throw "The WinslowTG logo is missing: $script:ReportLogoPath"
-    }
+    $logoPath = Resolve-ReportLogoPath
 
     $reportDate = Get-Date -Format 'MMMM d, yyyy'
     $displayTarget = ([uri]$Data.Target).Host
@@ -1854,7 +1882,7 @@ function New-OpenXmlHealthReport {
         Add-OpenXmlPackageEntry $archive 'word/_rels/document.xml.rels' $documentRelationships
         Add-OpenXmlPackageEntry $archive 'word/header1.xml' $headerXml
         Add-OpenXmlPackageEntry $archive 'word/_rels/header1.xml.rels' $headerRelationships
-        Add-OpenXmlBinaryPackageEntry $archive 'word/media/winslowtg-logo.png' $script:ReportLogoPath
+        Add-OpenXmlBinaryPackageEntry $archive 'word/media/winslowtg-logo.png' $logoPath
         Add-OpenXmlPackageEntry $archive 'word/footer1.xml' $footerXml
         Add-OpenXmlPackageEntry $archive 'docProps/core.xml' $coreXml
         Add-OpenXmlPackageEntry $archive 'docProps/app.xml' $appXml
