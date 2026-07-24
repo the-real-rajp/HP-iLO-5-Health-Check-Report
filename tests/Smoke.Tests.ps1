@@ -110,6 +110,7 @@ $sharedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
 })
 Assert-Equal $sharedInterface.InterfaceType 'Shared' 'Shared iLO interface type conversion failed'
 Assert-Equal (Get-IloNetworkPortAssessmentStatus $sharedInterface.Rows) 'HEALTHY' 'Enabled shared iLO network interface should be healthy'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus @([PSCustomObject]@{ Setting = 'Configured for iLO'; Value = 'True' })) $null 'A configured NIC with no health evidence should not be assessed'
 Assert-Equal (@($sharedInterface.Rows | Where-Object Setting -eq 'Shared NIC')[0].Value) 'LOM' 'Shared NIC configuration was not collected'
 $dedicatedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
     Name = 'Manager Dedicated Network Interface'
@@ -127,7 +128,82 @@ $server = Convert-ServerStatus ([PSCustomObject]@{
     Status = [PSCustomObject]@{ HealthRollup = 'Warning' }
 })
 Assert-Equal $server.Health 'Warning' 'Server health conversion failed'
-Assert-Equal $server.Model 'ProLiant DL380 Gen10' 'Server model conversion failed'
+Assert-Equal $server.'Product name' 'ProLiant DL380 Gen10' 'Server model conversion failed'
+
+$iloInformation = Convert-IloInformation ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Model = 'iLO 5'
+    ManagerType = 'BMC'
+    FirmwareVersion = '3.10'
+    DateTime = '2026-07-24T12:00:00Z'
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+})
+Assert-Equal $iloInformation.'Firmware version' '3.10' 'iLO firmware conversion failed'
+Assert-Equal $iloInformation.Health 'OK' 'iLO health conversion failed'
+
+$computeOps = Convert-ComputeOpsManagement ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Oem = [PSCustomObject]@{
+        Hpe = [PSCustomObject]@{
+            CloudConnect = [PSCustomObject]@{
+                ActivationKey = 'must-not-be-reported'
+                CloudConnectStatus = 'Connected'
+                WorkspaceId = 'workspace-123'
+                FailReason = 'None'
+            }
+        }
+    }
+})
+Assert-Equal $computeOps.'Connection status' 'Connected' 'Compute Ops Management status conversion failed'
+Assert-Equal $computeOps.'Workspace ID' 'workspace-123' 'Compute Ops Management workspace conversion failed'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ 'Connection status' = 'ConnectionFailed' })) 'CRITICAL' 'Failed Compute Ops connection should be critical'
+if ($computeOps.PSObject.Properties.Name -contains 'Activation key' -or
+    (($computeOps.PSObject.Properties.Value | ForEach-Object { [string]$_ }) -join ' ') -match 'must-not-be-reported') {
+    throw 'Compute Ops Management output exposed the activation key.'
+}
+
+$systemNic = Convert-SystemNetworkInterface ([PSCustomObject]@{
+    Name = 'Embedded LOM 1'
+    MACAddress = '00:11:22:33:44:66'
+    LinkStatus = 'LinkUp'
+    SpeedMbps = 1000
+    IPv4Addresses = @([PSCustomObject]@{ Address = '192.0.2.30' })
+    Status = [PSCustomObject]@{ Health = 'OK' }
+})
+Assert-Equal $systemNic.'MAC address' '00:11:22:33:44:66' 'System network MAC conversion failed'
+Assert-Equal $systemNic.'IPv4 addresses' '192.0.2.30' 'System network IPv4 conversion failed'
+
+$deviceRecord = Convert-DeviceInventory ([PSCustomObject]@{
+    Name = 'Smart Array'
+    DeviceType = 'StorageController'
+    Location = 'Embedded RAID'
+    ProductVersion = 'B'
+    FirmwareVersion = '6.52'
+    Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' }
+})
+Assert-Equal $deviceRecord.Location 'Embedded RAID' 'Device inventory location conversion failed'
+Assert-Equal $deviceRecord.'Firmware version' '6.52' 'Device inventory firmware conversion failed'
+Assert-Equal $deviceRecord.Status 'Enabled' 'Device inventory status conversion failed'
+
+$remoteSupport = Convert-RemoteSupportRegistration ([PSCustomObject]@{
+    RemoteSupportEnabled = $true
+    ConnectModel = 'CentralConnect'
+    DestinationURL = 'https://remote-support.example'
+    LastTransmissionError = 'None'
+})
+Assert-Equal $remoteSupport.Registration 'Registered' 'Remote Support registration conversion failed'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @($remoteSupport)) 'HEALTHY' 'Registered Remote Support should be healthy'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @([PSCustomObject]@{ Registration = 'Not registered' })) 'RECOMMENDED' 'Unregistered Remote Support should be recommended'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @()) $null 'Uncollected Remote Support should not be assessed'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Health = 'Unknown'; State = 'Unknown' })) $null 'Unknown-only evidence should not be assessed'
+
+$unknownReportData = [PSCustomObject]@{
+    Example = @([PSCustomObject][ordered]@{ Name = 'Adapter 1'; Health = 'Unknown'; State = 'Enabled' })
+}
+$unknownReportRows = @(Get-ReportRecords -Data $unknownReportData -PropertyName 'Example')
+if ($unknownReportRows[0].PSObject.Properties.Name -contains 'Health') {
+    throw 'An all-Unknown report column should be omitted.'
+}
 if (-not (Get-Command New-IloSession).Parameters.ContainsKey('IgnoreCertificateErrors')) {
     throw 'New-IloSession is missing the internal certificate-control parameter.'
 }
@@ -153,6 +229,7 @@ $assessmentData = [PSCustomObject]@{
     Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    RemoteSupportRegistration = @([PSCustomObject]@{ Registration = 'Registered'; 'Last transmission error' = 'None' })
     IloDedicatedNetworkPort = $dedicatedInterface.Rows
     IloSharedNetworkPort = $sharedInterface.Rows
     EventLogs = @(
@@ -165,20 +242,18 @@ $assessmentData = [PSCustomObject]@{
 $assessment = @(New-AssessmentSummary $assessmentData)
 $expectedSections = @(
     'Information', 'System Information', 'Firmware & OS Software',
-    'iLO Federation', 'Remote Console & Media', 'Power & Thermal',
+    'Power & Thermal',
     'Performance', 'iLO Dedicated Network Port', 'iLO Shared Network Port',
-    'Remote Support', 'Administration', 'Security', 'Management',
-    'Lifecycle Management'
+    'Remote Support', 'Security Dashboard'
 )
-Assert-Equal $assessment.Count 14 'Assessment summary row count is incorrect'
+Assert-Equal $assessment.Count 9 'Assessment summary row count is incorrect'
 Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'Assessment summary order is incorrect'
 Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
-Assert-Equal $assessment[5].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
-Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidence should be recommended'
-Assert-Equal $assessment[7].Status 'IGNORED' 'Unconfigured dedicated iLO NIC assessment should be ignored'
-Assert-Equal $assessment[8].Status 'HEALTHY' 'Configured shared iLO NIC assessment should be healthy'
-Assert-Equal $assessment[10].Status 'CRITICAL' 'A recent critical event should make Administration critical'
-Assert-Equal $assessment[11].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security assessment'
+Assert-Equal $assessment[3].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
+Assert-Equal $assessment[5].Status 'IGNORED' 'Unconfigured dedicated iLO NIC assessment should be ignored'
+Assert-Equal $assessment[6].Status 'HEALTHY' 'Configured shared iLO NIC assessment should be healthy'
+Assert-Equal $assessment[7].Status 'HEALTHY' 'Registered Remote Support should be healthy'
+Assert-Equal $assessment[8].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security Dashboard assessment'
 $criticalRecentEvents = @(Get-CriticalRecentEventLogs $assessmentData)
 Assert-Equal $criticalRecentEvents.Count 1 'Event-log report filtering should retain only recent critical events'
 Assert-Equal $criticalRecentEvents[0].Message 'Recent critical event' 'The wrong event survived report filtering'
@@ -196,6 +271,28 @@ $nativeReportData = [PSCustomObject]@{
         Health = 'OK'
         State = 'Enabled'
     }
+    IloInformation = @([PSCustomObject][ordered]@{
+        Name = 'iLO 5'
+        Model = 'iLO 5'
+        'Manager type' = 'BMC'
+        'Firmware version' = '3.10'
+        Health = 'OK'
+        State = 'Enabled'
+    })
+    StatusInformation = @([PSCustomObject][ordered]@{
+        Component = 'Server'
+        Health = 'OK'
+        State = 'Enabled'
+        Detail = 'Power: On'
+    })
+    ComputeOpsManagement = @([PSCustomObject][ordered]@{
+        Manager = 'iLO 5'
+        Supported = 'Yes'
+        'Connection status' = 'Connected'
+        'Workspace ID' = 'workspace-123'
+        'Failure reason' = 'None'
+        'Next retry time' = 'N/A'
+    })
     Temperatures = @([PSCustomObject][ordered]@{
         Name = 'Ambient'
         'Reading (C)' = 22
@@ -234,6 +331,22 @@ $nativeReportData = [PSCustomObject]@{
         Health = 'OK'
         State = 'Enabled'
     })
+    SystemNetwork = @([PSCustomObject][ordered]@{
+        Name = 'Embedded LOM 1'
+        Type = 'Ethernet interface'
+        'MAC address' = '00:11:22:33:44:66'
+        'IPv4 addresses' = '192.0.2.30'
+        Link = 'LinkUp'
+        'Speed (Mbps)' = 1000
+        Health = 'OK'
+    })
+    DeviceInventory = @([PSCustomObject][ordered]@{
+        Location = 'Embedded RAID'
+        'Product name' = 'Smart Array'
+        'Product version' = 'Unknown'
+        'Firmware version' = '6.52'
+        Status = 'Enabled'
+    })
     Firmware = @([PSCustomObject][ordered]@{
         Name = 'iLO 5'
         Version = '3.10'
@@ -241,6 +354,12 @@ $nativeReportData = [PSCustomObject]@{
     })
     IloDedicatedNetworkPort = $dedicatedInterface.Rows
     IloSharedNetworkPort = $sharedInterface.Rows
+    RemoteSupportRegistration = @([PSCustomObject][ordered]@{
+        Registration = 'Registered'
+        'Connection model' = 'CentralConnect'
+        Destination = 'https://remote-support.example'
+        'Last transmission error' = 'None'
+    })
     Management = @([PSCustomObject][ordered]@{
         Name = 'iLO 5'
         Firmware = '3.10'
@@ -281,7 +400,6 @@ try {
     $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer'
     Assert-Equal $createdReport $nativeReportPath 'Native DOCX generator returned the wrong path'
     if (-not (Test-Path $nativeReportPath)) { throw 'Native DOCX generator did not create a report.' }
-
     Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
     $zip = [IO.Compression.ZipFile]::OpenRead($nativeReportPath)
@@ -307,17 +425,46 @@ try {
         foreach ($expectedText in @(
             'Recommended Action',
             'Assessment Summary',
+            'Information',
+            'Server',
+            'iLO',
+            'Status',
+            'HPE Compute Ops Management',
+            'Remote Support',
+            'Registration',
+            'Registered',
             'Security Dashboard',
-            'iLO Dedicated Network Port',
-            'iLO Shared Network Port',
-            'Shared NIC',
-            'Recent critical event for report validation.'
+            'System Information',
+            'Summary',
+            'Processors',
+            'Memory',
+            'Network',
+            'Device Inventory',
+            'Storage',
+            'Firmware &amp; OS Software',
+            'Power &amp; Thermal',
+            'Power Supply',
+            'Fans',
+            'Temperatures',
+            'Connected',
+            'Embedded LOM 1',
+            'Smart Array'
         )) {
             if ($documentText -notmatch [regex]::Escape($expectedText)) {
                 throw "Native DOCX is missing expected text: $expectedText."
             }
         }
-        foreach ($unexpectedText in @('Overall Health Score', 'Recent warning event that must be omitted.', 'Old critical event that must be omitted.')) {
+        foreach ($unexpectedText in @(
+            'Overall Health Score',
+            'Administration - Event Logs',
+            'Lifecycle Management',
+            '>Administration<',
+            '>Management<',
+            'Unknown',
+            'Recent critical event for report validation.',
+            'Recent warning event that must be omitted.',
+            'Old critical event that must be omitted.'
+        )) {
             if ($documentText -match [regex]::Escape($unexpectedText)) {
                 throw "Native DOCX contains text that should have been omitted: $unexpectedText."
             }

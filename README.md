@@ -5,30 +5,36 @@ PowerShell and the Redfish API. Microsoft Word is optional.
 
 The report covers:
 
-- server status
-- temperatures
-- fans
-- power supplies
-- storage
-- memory
-- processors
-- firmware
-- iLO Dedicated and Shared Network Port configuration
+- Information: server identity, iLO details, component status, and HPE Compute
+  Ops Management connection state
+- Remote Support: registration, connection model, destination, and recent
+  transmission state
+- Security Dashboard: overall status and individual security findings
+- System Information: summary, processors, memory, host network interfaces,
+  HPE server device inventory, and storage
+- Firmware & OS Software
+- Power & Thermal: power supplies, fans, and temperatures
 - Integrated Management Log, iLO Event Log, and other advertised log services
-- iLO Security Dashboard overall status and risks
-- empty detail sections and hardware records reported as `Absent` are omitted
+- empty detail sections, `Unknown` fields, and hardware records reported as
+  `Absent` are omitted
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
 The Word output follows a two-part health-assessment format: a branded cover
 page followed by an Executive Overview with a Recommended Action,
-fourteen-section Assessment Summary, and detailed evidence tables. Storage
-evidence represents controllers, physical drives, and logical volumes when iLO
-advertises them. Administration event-log evidence is limited to entries with
-`Critical` severity from the previous month. A Dedicated or Shared Network Port
-that is not configured for iLO is marked `IGNORED`; the Shared Network Port
-section still lists its advertised interface, IP, VLAN, NIC, and port settings.
+evidence-based Assessment Summary, and grouped detailed evidence tables. Sections
+with only `Unknown` or unavailable status data are not displayed or counted.
+The former Lifecycle Management, Management, and Administration summary rows
+are not included. Storage evidence represents controllers, physical drives, and
+logical volumes when iLO advertises them. Event-log evidence is limited to
+entries with `Critical` severity from the previous month and contributes to
+recommended-action logic. A Dedicated or Shared Network Port that is not
+configured for iLO is marked `IGNORED` in the Assessment Summary. Remote Support
+is `HEALTHY` when registered, `RECOMMENDED` when explicitly unregistered or
+reporting a transmission error, and omitted when its registration is unknown.
 An `Ignored` Overall Security Status is treated as healthy, and individual
 Security Dashboard findings with `Ignored = True` display `Ignored`.
+HPE Compute Ops Management uses iLO's HPE `CloudConnect` status. The report
+does not include the GreenLake activation key.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or

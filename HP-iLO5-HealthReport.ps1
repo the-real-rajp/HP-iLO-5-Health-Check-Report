@@ -342,14 +342,122 @@ function Get-SafeCollection {
 function Convert-ServerStatus {
     param([Parameter(Mandatory)][object]$System)
 
+    $oem = Get-ObjectProperty $System 'Oem'
+    $hpe = Get-ObjectProperty $oem 'Hpe'
+    $hostOs = Get-ObjectProperty $hpe 'HostOS'
+    $osParts = @(@(
+        Get-ObjectProperty $hostOs 'OsName'
+        Get-ObjectProperty $hostOs 'OsVersion'
+    ) | Where-Object { $_ })
     [ordered]@{
-        'Name' = (Get-ObjectProperty $System 'HostName' (Get-ObjectProperty $System 'Name' 'Unknown'))
-        'Model' = Get-ObjectProperty $System 'Model' 'Unknown'
+        'Product name' = Get-ObjectProperty $System 'Model' 'Unknown'
+        'Server name' = (Get-ObjectProperty $System 'HostName' (Get-ObjectProperty $System 'Name' 'Unknown'))
+        'Operating system' = if ($osParts.Count -gt 0) { $osParts -join ' ' } else { Get-ObjectProperty $hostOs 'OsDescription' 'Unknown' }
+        'System ROM' = Get-ObjectProperty $System 'BiosVersion' 'Unknown'
+        'Server serial number' = Get-ObjectProperty $System 'SerialNumber' 'Unknown'
+        'Product ID' = Get-ObjectProperty $System 'SKU' 'Unknown'
+        'UUID' = Get-ObjectProperty $System 'UUID' 'Unknown'
         'Manufacturer' = Get-ObjectProperty $System 'Manufacturer' 'Unknown'
-        'Serial number' = Get-ObjectProperty $System 'SerialNumber' 'Unknown'
         'Power state' = Get-ObjectProperty $System 'PowerState' 'Unknown'
-        'BIOS version' = Get-ObjectProperty $System 'BiosVersion' 'Unknown'
         'Health' = Get-HealthValue $System
+    }
+}
+
+function Convert-IloInformation {
+    param([Parameter(Mandatory)][object]$Manager)
+
+    [PSCustomObject][ordered]@{
+        'Name' = Get-ObjectProperty $Manager 'Name' (Get-ObjectProperty $Manager 'Id' 'iLO Manager')
+        'Model' = Get-ObjectProperty $Manager 'Model' 'Unknown'
+        'Manager type' = Get-ObjectProperty $Manager 'ManagerType' 'Unknown'
+        'Firmware version' = Get-ObjectProperty $Manager 'FirmwareVersion' 'Unknown'
+        'Date and time' = Get-ObjectProperty $Manager 'DateTime' 'Unknown'
+        'Health' = Get-HealthValue $Manager
+        'State' = Get-StateValue $Manager
+    }
+}
+
+function Convert-ComputeOpsManagement {
+    param([Parameter(Mandatory)][object]$Manager)
+
+    $oem = Get-ObjectProperty $Manager 'Oem'
+    $hpe = Get-ObjectProperty $oem 'Hpe'
+    $cloudConnect = Get-ObjectProperty $hpe 'CloudConnect'
+    [PSCustomObject][ordered]@{
+        'Manager' = Get-ObjectProperty $Manager 'Name' (Get-ObjectProperty $Manager 'Id' 'iLO Manager')
+        'Supported' = if ($null -eq $cloudConnect) { 'Not advertised' } else { 'Yes' }
+        'Connection status' = Get-ObjectProperty $cloudConnect 'CloudConnectStatus' 'Unknown'
+        'Workspace ID' = Get-ObjectProperty $cloudConnect 'WorkspaceId' 'Not reported'
+        'Failure reason' = Get-ObjectProperty $cloudConnect 'FailReason' 'None'
+        'Next retry time' = Get-ObjectProperty $cloudConnect 'NextRetryTime' 'N/A'
+    }
+}
+
+function Convert-SystemNetworkInterface {
+    param(
+        [Parameter(Mandatory)][object]$Item,
+        [string]$Type = 'Ethernet interface'
+    )
+
+    $ipv4Addresses = @(Get-ObjectProperty $Item 'IPv4Addresses' @())
+    $ipv4 = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'Address' } | Where-Object { $_ }) -join '; '
+    $ethernet = Get-ObjectProperty $Item 'Ethernet'
+    $macAddress = Get-ObjectProperty $Item 'MACAddress' (Get-ObjectProperty $ethernet 'MACAddress' 'Unknown')
+    $speed = Get-ObjectProperty $Item 'SpeedMbps' (Get-ObjectProperty $Item 'CurrentLinkSpeedMbps' 'N/A')
+
+    [PSCustomObject][ordered]@{
+        'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Unknown')
+        'Type' = $Type
+        'MAC address' = $macAddress
+        'IPv4 addresses' = if ($ipv4) { $ipv4 } else { 'Not reported' }
+        'Link' = Get-ObjectProperty $Item 'LinkStatus' 'Unknown'
+        'Speed (Mbps)' = $speed
+        'Health' = Get-HealthValue $Item
+    }
+}
+
+function Convert-DeviceInventory {
+    param([Parameter(Mandatory)][object]$Item)
+
+    $firmwareVersion = Get-ObjectProperty $Item 'FirmwareVersion'
+    $currentFirmware = Get-ObjectProperty $firmwareVersion 'Current'
+    $versionString = Get-ObjectProperty $currentFirmware 'VersionString'
+    if (-not $versionString -and $firmwareVersion -is [string]) { $versionString = $firmwareVersion }
+    $health = Get-HealthValue $Item
+    $state = Get-StateValue $Item
+    $displayStatus = if ($health -match '(?i)critical|warning|degraded|failed') { $health } else { $state }
+    [PSCustomObject][ordered]@{
+        'Location' = Get-ObjectProperty $Item 'Location' 'Unknown'
+        'Product name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Model' (Get-ObjectProperty $Item 'Id' 'Unknown'))
+        'Product version' = Get-ObjectProperty $Item 'ProductVersion' 'Unknown'
+        'Firmware version' = if ($versionString) { $versionString } else { 'Unknown' }
+        'Status' = $displayStatus
+    }
+}
+
+function Convert-RemoteSupportRegistration {
+    param([Parameter(Mandatory)][object]$Item)
+
+    $enabled = Get-ObjectProperty $Item 'RemoteSupportEnabled'
+    $registration = if ($enabled -eq $true) {
+        'Registered'
+    }
+    elseif ($enabled -eq $false) {
+        'Not registered'
+    }
+    else {
+        'Unknown'
+    }
+    [PSCustomObject][ordered]@{
+        'Registration' = $registration
+        'Connection model' = Get-ObjectProperty $Item 'ConnectModel' 'Unknown'
+        'Destination' = Get-ObjectProperty $Item 'DestinationURL' 'Unknown'
+        'Destination port' = Get-ObjectProperty $Item 'DestinationPort' 'Unknown'
+        'External agent' = Get-ObjectProperty $Item 'ExternalAgentName' 'Unknown'
+        'Last transmission' = Get-ObjectProperty $Item 'LastTransmissionDate' 'Unknown'
+        'Last transmission type' = Get-ObjectProperty $Item 'LastTransmissionType' 'Unknown'
+        'Last transmission error' = Get-ObjectProperty $Item 'LastTransmissionError' 'Unknown'
+        'Maintenance mode' = Get-ObjectProperty $Item 'MaintenanceModeEnabled' 'Unknown'
     }
 }
 
@@ -407,6 +515,68 @@ function Test-ReportRecordPresent {
     return ([string]$state -notmatch '(?i)^absent$')
 }
 
+function Test-UnknownReportValue {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $true }
+    return ([string]$Value).Trim() -match '(?i)^(unknown)?$'
+}
+
+function Get-ReportRecords {
+    param(
+        [Parameter(Mandatory)][object]$Data,
+        [Parameter(Mandatory)][string]$PropertyName,
+        [switch]$PropertyMap
+    )
+
+    $property = $Data.PSObject.Properties[$PropertyName]
+    if ($null -eq $property -or $null -eq $property.Value) { return @() }
+    if ($PropertyMap -and $property.Value -is [Collections.IDictionary]) {
+        return @($property.Value.GetEnumerator() | ForEach-Object {
+            if (-not (Test-UnknownReportValue $_.Value)) {
+                [PSCustomObject][ordered]@{ Item = $_.Key; Value = $_.Value }
+            }
+        })
+    }
+    $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
+    if ($records.Count -eq 0) { return @() }
+
+    $columns = [Collections.Generic.List[string]]::new()
+    foreach ($record in $records) {
+        foreach ($recordProperty in $record.PSObject.Properties) {
+            if (-not $columns.Contains($recordProperty.Name)) { $columns.Add($recordProperty.Name) }
+        }
+    }
+    $usefulColumns = @($columns | Where-Object {
+        $columnName = $_
+        @($records | Where-Object {
+            -not (Test-UnknownReportValue (Get-ObjectProperty $_ $columnName))
+        }).Count -gt 0
+    })
+    if ($usefulColumns.Count -eq 0) { return @() }
+
+    return @($records | ForEach-Object {
+        $source = $_
+        $row = [ordered]@{}
+        foreach ($columnName in $usefulColumns) {
+            $value = Get-ObjectProperty $source $columnName
+            $row[$columnName] = if (Test-UnknownReportValue $value) { '' } else { $value }
+        }
+        [PSCustomObject]$row
+    })
+}
+
+function Get-ReportPropertyRows {
+    param([AllowNull()][object]$Record)
+
+    if ($null -eq $Record) { return @() }
+    return @($Record.PSObject.Properties | ForEach-Object {
+        if (-not (Test-UnknownReportValue $_.Value)) {
+            [PSCustomObject][ordered]@{ Item = $_.Name; Value = $_.Value }
+        }
+    })
+}
+
 function Convert-Processor {
     param([Parameter(Mandatory)][object]$Item)
     [PSCustomObject][ordered]@{
@@ -414,6 +584,8 @@ function Convert-Processor {
         'Model' = Get-ObjectProperty $Item 'Model' 'Unknown'
         'Cores' = Get-ObjectProperty $Item 'TotalCores' 'N/A'
         'Threads' = Get-ObjectProperty $Item 'TotalThreads' 'N/A'
+        'Speed (MHz)' = Get-ObjectProperty $Item 'OperatingSpeedMHz' (Get-ObjectProperty $Item 'MaxSpeedMHz' 'Unknown')
+        'Instruction set' = Get-ObjectProperty $Item 'InstructionSet' 'Unknown'
         'Health' = Get-HealthValue $Item
         'State' = Get-StateValue $Item
     }
@@ -560,6 +732,41 @@ function Get-IloHealthData {
         -Notes $notes `
         -Label 'managers')
 
+    $iloInformation = @($managers | ForEach-Object { Convert-IloInformation $_ })
+    $computeOpsManagement = @($managers | ForEach-Object { Convert-ComputeOpsManagement $_ })
+    $remoteSupportRegistration = [Collections.Generic.List[object]]::new()
+    foreach ($manager in $managers) {
+        $managerUri = Get-ObjectProperty $manager '@odata.id'
+        $managerOem = Get-ObjectProperty $manager 'Oem'
+        $managerHpe = Get-ObjectProperty $managerOem 'Hpe'
+        $managerHpeLinks = Get-ObjectProperty $managerHpe 'Links'
+        $remoteSupportUri = Get-RedfishLink $managerHpeLinks 'RemoteSupport'
+        $remoteSupportFallback = if ($managerUri) { "$($managerUri.TrimEnd('/'))/RemoteSupportService" } else { $null }
+        $remoteSupport = Get-SafeResourceFromUris `
+            -Session $Session `
+            -Uris @($remoteSupportUri, $remoteSupportFallback) `
+            -Notes $notes `
+            -Label 'remote support registration'
+        if ($null -ne $remoteSupport) {
+            $remoteSupportRegistration.Add((Convert-RemoteSupportRegistration $remoteSupport))
+        }
+    }
+    $statusInformation = [System.Collections.Generic.List[object]]::new()
+    $statusInformation.Add([PSCustomObject][ordered]@{
+        'Component' = 'Server'
+        'Health' = Get-HealthValue $system
+        'State' = Get-StateValue $system
+        'Detail' = "Power: $(Get-ObjectProperty $system 'PowerState' 'Unknown')"
+    })
+    foreach ($manager in $managers) {
+        $statusInformation.Add([PSCustomObject][ordered]@{
+            'Component' = Get-ObjectProperty $manager 'Name' (Get-ObjectProperty $manager 'Id' 'iLO Manager')
+            'Health' = Get-HealthValue $manager
+            'State' = Get-StateValue $manager
+            'Detail' = "Firmware: $(Get-ObjectProperty $manager 'FirmwareVersion' 'Unknown')"
+        })
+    }
+
     $iloDedicatedNetworkPort = @()
     $iloSharedNetworkPort = @()
     foreach ($manager in $managers) {
@@ -609,8 +816,52 @@ function Get-IloHealthData {
         Where-Object { Test-ReportRecordPresent $_ })
     $processors = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Processors') $notes 'processors') | ForEach-Object { Convert-Processor $_ })
 
-    $storage = [System.Collections.Generic.List[object]]::new()
+    $systemNetwork = @()
     $systemUri = Get-ObjectProperty $system '@odata.id'
+    $ethernetInterfacesUri = Get-RedfishLink $system 'EthernetInterfaces'
+    if (-not $ethernetInterfacesUri -and $systemUri) {
+        $ethernetInterfacesUri = "$($systemUri.TrimEnd('/'))/EthernetInterfaces"
+    }
+    $networkInterfacesUri = Get-RedfishLink $system 'NetworkInterfaces'
+    if (-not $networkInterfacesUri -and $systemUri) {
+        $networkInterfacesUri = "$($systemUri.TrimEnd('/'))/NetworkInterfaces"
+    }
+    $systemNetwork = @(Get-SafeCollectionFromUris `
+        -Session $Session `
+        -Uris @($ethernetInterfacesUri, $networkInterfacesUri) `
+        -Notes $notes `
+        -Label 'system network interfaces' | ForEach-Object {
+            $odataType = [string](Get-ObjectProperty $_ '@odata.type' '')
+            $interfaceType = if ($odataType -match '(?i)NetworkInterface') { 'Network interface' } else { 'Ethernet interface' }
+            Convert-SystemNetworkInterface -Item $_ -Type $interfaceType
+        })
+
+    $deviceInventory = [System.Collections.Generic.List[object]]::new()
+    $deviceUris = [System.Collections.Generic.List[string]]::new()
+    foreach ($owner in $chassis) {
+        $ownerUri = Get-ObjectProperty $owner '@odata.id'
+        $ownerOem = Get-ObjectProperty $owner 'Oem'
+        $ownerHpe = Get-ObjectProperty $ownerOem 'Hpe'
+        $ownerHpeLinks = Get-ObjectProperty $ownerHpe 'Links'
+        foreach ($uri in @(
+            (Get-RedfishLink $ownerHpeLinks 'Devices'),
+            $(if ($ownerUri) { "$($ownerUri.TrimEnd('/'))/Devices" }),
+            (Get-RedfishLinkAny $owner 'PCIeDevices'),
+            $(if ($ownerUri) { "$($ownerUri.TrimEnd('/'))/PCIeDevices" })
+        )) {
+            if ($uri -and -not $deviceUris.Contains($uri)) { $deviceUris.Add($uri) }
+        }
+    }
+    if ($deviceUris.Count -eq 0) {
+        Add-CollectionNote $notes 'Device inventory is not advertised by this system.'
+    }
+    else {
+        foreach ($device in @(Get-SafeCollectionFromUris $Session $deviceUris.ToArray() $notes 'device inventory')) {
+            $deviceInventory.Add((Convert-DeviceInventory $device))
+        }
+    }
+
+    $storage = [System.Collections.Generic.List[object]]::new()
     $standardStorageUri = if ($systemUri) { "$($systemUri.TrimEnd('/'))/Storage" } else { $null }
     $storageUris = @($standardStorageUri, (Get-RedfishLink $system 'Storage'))
     foreach ($item in @(Get-SafeCollectionFromUris $Session $storageUris $notes 'storage')) {
@@ -717,29 +968,25 @@ function Get-IloHealthData {
         }
     }
 
-    $management = @($managers | ForEach-Object {
-        [PSCustomObject][ordered]@{
-            'Name' = Get-ObjectProperty $_ 'Name' (Get-ObjectProperty $_ 'Id' 'iLO Manager')
-            'Firmware version' = Get-ObjectProperty $_ 'FirmwareVersion' 'Unknown'
-            'Health' = Get-HealthValue $_
-            'State' = Get-StateValue $_
-        }
-    })
-
     [PSCustomObject][ordered]@{
         GeneratedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
         Target = $Session.BaseUri.AbsoluteUri.TrimEnd('/')
         ServerStatus = Convert-ServerStatus $system
+        IloInformation = $iloInformation
+        StatusInformation = $statusInformation.ToArray()
+        ComputeOpsManagement = $computeOpsManagement
+        RemoteSupportRegistration = $remoteSupportRegistration.ToArray()
         Temperatures = $temperatures
         Fans = $fans
         PowerSupplies = $powerSupplies
         Storage = $storage.ToArray()
         Memory = $memory
         Processors = $processors
+        SystemNetwork = $systemNetwork
+        DeviceInventory = $deviceInventory.ToArray()
         Firmware = $firmware
         IloDedicatedNetworkPort = $iloDedicatedNetworkPort
         IloSharedNetworkPort = $iloSharedNetworkPort
-        Management = $management
         EventLogs = $eventLogs.ToArray()
         SecurityDashboard = $securityDashboard.ToArray()
         CollectionNotes = $notes.ToArray()
@@ -759,25 +1006,25 @@ function Get-StatusColor {
     $text = [string]$Value
     if ($text -match '(?i)critical|failed|fatal|risk') { return ConvertTo-WordColor 'D00000' }
     if ($text -match '(?i)warning|degraded|caution|recommended|ignored') { return ConvertTo-WordColor 'E59B00' }
-    if ($text -match '(?i)^ok$|^enabled$|^healthy$') { return ConvertTo-WordColor '008A3B' }
+    if ($text -match '(?i)^ok$|^enabled$|^healthy$|^connected$|^registered$') { return ConvertTo-WordColor '008A3B' }
     return ConvertTo-WordColor '555555'
 }
 
 function Get-AssessmentStatus {
     param([AllowEmptyCollection()][object[]]$Items)
 
-    if (@($Items).Count -eq 0) { return 'RECOMMENDED' }
+    if (@($Items).Count -eq 0) { return $null }
     $signals = [System.Collections.Generic.List[string]]::new()
     foreach ($item in $Items) {
         $ignored = [bool](Get-ObjectProperty -InputObject $item -Name 'Ignored' -Default $false)
-        foreach ($name in @('Health', 'HealthRollup', 'State', 'Severity', 'SecurityStatus', 'OverallSecurityStatus', 'Security status')) {
+        foreach ($name in @('Health', 'HealthRollup', 'State', 'Status', 'Severity', 'SecurityStatus', 'OverallSecurityStatus', 'Security status', 'Connection status')) {
             $value = if ($item -is [Collections.IDictionary] -and $item.Contains($name)) {
                 $item[$name]
             }
             else {
                 Get-ObjectProperty -InputObject $item -Name $name
             }
-            if ($null -ne $value) {
+            if ($null -ne $value -and [string]$value -notmatch '(?i)^\s*(unknown)?\s*$') {
                 if ($ignored -and $name -match '(?i)security' -and [string]$value -match '(?i)^risk$') {
                     $signals.Add('Ignored')
                 }
@@ -787,10 +1034,10 @@ function Get-AssessmentStatus {
             }
         }
     }
-    if ($signals.Count -eq 0) { return 'RECOMMENDED' }
+    if ($signals.Count -eq 0) { return $null }
     $evidence = $signals -join ' '
     if ($evidence -match '(?i)critical|failed|fatal|risk') { return 'CRITICAL' }
-    if ($evidence -match '(?i)warning|degraded|caution|unknown|disabled|ignored') { return 'RECOMMENDED' }
+    if ($evidence -match '(?i)warning|degraded|caution|disabled|ignored|notconnected|notenabled|retryinprogress|connectioninprogress') { return 'RECOMMENDED' }
     return 'HEALTHY'
 }
 
@@ -845,18 +1092,33 @@ function Get-SecurityAssessmentStatus {
 function Get-IloNetworkPortAssessmentStatus {
     param([AllowEmptyCollection()][object[]]$Rows)
 
-    if (@($Rows).Count -eq 0) { return 'RECOMMENDED' }
+    if (@($Rows).Count -eq 0) { return $null }
     $configuredRow = @($Rows | Where-Object Setting -eq 'Configured for iLO' | Select-Object -First 1)
-    if ($configuredRow.Count -eq 0) { return 'RECOMMENDED' }
+    if ($configuredRow.Count -eq 0) { return $null }
     $configured = [string]$configuredRow[0].Value
     if ($configured -match '(?i)^false$') { return 'IGNORED' }
-    if ($configured -notmatch '(?i)^true$') { return 'RECOMMENDED' }
+    if ($configured -notmatch '(?i)^true$') { return $null }
 
-    $health = [string](@($Rows | Where-Object Setting -eq 'Health' | Select-Object -First 1).Value)
-    $linkStatus = [string](@($Rows | Where-Object Setting -eq 'Link status' | Select-Object -First 1).Value)
+    $healthRow = @($Rows | Where-Object Setting -eq 'Health' | Select-Object -First 1)
+    $linkStatusRow = @($Rows | Where-Object Setting -eq 'Link status' | Select-Object -First 1)
+    $health = if ($healthRow.Count -gt 0) { [string](Get-ObjectProperty $healthRow[0] 'Value' '') } else { '' }
+    $linkStatus = if ($linkStatusRow.Count -gt 0) { [string](Get-ObjectProperty $linkStatusRow[0] 'Value' '') } else { '' }
+    if ("$health$linkStatus" -match '(?i)^\s*(unknown)?\s*$') { return $null }
     if ("$health $linkStatus" -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
     if ("$health $linkStatus" -match '(?i)warning|degraded|unknown|nolink|linkdown') { return 'RECOMMENDED' }
     return 'HEALTHY'
+}
+
+function Get-RemoteSupportAssessmentStatus {
+    param([AllowEmptyCollection()][object[]]$Rows)
+
+    if (@($Rows).Count -eq 0) { return $null }
+    $registration = [string](Get-ObjectProperty $Rows[0] 'Registration' '')
+    $lastError = [string](Get-ObjectProperty $Rows[0] 'Last transmission error' '')
+    if ($lastError -and $lastError -notmatch '(?i)^(none|no error|unknown)$') { return 'RECOMMENDED' }
+    if ($registration -match '(?i)^registered$') { return 'HEALTHY' }
+    if ($registration -match '(?i)^not registered$') { return 'RECOMMENDED' }
+    return $null
 }
 
 function New-AssessmentSummary {
@@ -868,25 +1130,33 @@ function New-AssessmentSummary {
     })
     $securityDashboard = @((Get-ObjectProperty $Data 'SecurityDashboard' @()))
     $securityEvidence = $securityDashboard + $securityEvents
-    $powerThermal = @($Data.Temperatures) + @($Data.Fans) + @($Data.PowerSupplies)
-    $performance = @($Data.Memory) + @($Data.Processors)
-
-    return @(
-        [PSCustomObject]@{ Section = 'Information'; Status = Get-AssessmentStatus @($Data.ServerStatus) }
-        [PSCustomObject]@{ Section = 'System Information'; Status = Get-AssessmentStatus @($Data.ServerStatus) }
-        [PSCustomObject]@{ Section = 'Firmware & OS Software'; Status = Get-AssessmentStatus @($Data.Firmware) }
-        [PSCustomObject]@{ Section = 'iLO Federation'; Status = 'RECOMMENDED' }
-        [PSCustomObject]@{ Section = 'Remote Console & Media'; Status = 'RECOMMENDED' }
+    $powerThermal = @((Get-ObjectProperty $Data 'Temperatures' @())) +
+        @((Get-ObjectProperty $Data 'Fans' @())) +
+        @((Get-ObjectProperty $Data 'PowerSupplies' @()))
+    $performance = @((Get-ObjectProperty $Data 'Memory' @())) +
+        @((Get-ObjectProperty $Data 'Processors' @()))
+    $informationEvidence = @((Get-ObjectProperty $Data 'ServerStatus' @())) +
+        @((Get-ObjectProperty $Data 'IloInformation' @())) +
+        @((Get-ObjectProperty $Data 'StatusInformation' @())) +
+        @((Get-ObjectProperty $Data 'ComputeOpsManagement' @()))
+    $systemEvidence = @((Get-ObjectProperty $Data 'ServerStatus' @())) +
+        @((Get-ObjectProperty $Data 'Processors' @())) +
+        @((Get-ObjectProperty $Data 'Memory' @())) +
+        @((Get-ObjectProperty $Data 'SystemNetwork' @())) +
+        @((Get-ObjectProperty $Data 'DeviceInventory' @())) +
+        @((Get-ObjectProperty $Data 'Storage' @()))
+    $candidates = @(
+        [PSCustomObject]@{ Section = 'Information'; Status = Get-AssessmentStatus $informationEvidence }
+        [PSCustomObject]@{ Section = 'System Information'; Status = Get-AssessmentStatus $systemEvidence }
+        [PSCustomObject]@{ Section = 'Firmware & OS Software'; Status = Get-AssessmentStatus @((Get-ObjectProperty $Data 'Firmware' @())) }
         [PSCustomObject]@{ Section = 'Power & Thermal'; Status = Get-AssessmentStatus $powerThermal }
         [PSCustomObject]@{ Section = 'Performance'; Status = Get-AssessmentStatus $performance }
         [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloDedicatedNetworkPort' @())) }
         [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloSharedNetworkPort' @())) }
-        [PSCustomObject]@{ Section = 'Remote Support'; Status = 'RECOMMENDED' }
-        [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $criticalRecentEvents }
-        [PSCustomObject]@{ Section = 'Security'; Status = if ($securityEvents.Count -gt 0) { Get-AssessmentStatus $securityEvidence } else { Get-SecurityAssessmentStatus $securityDashboard } }
-        [PSCustomObject]@{ Section = 'Management'; Status = Get-AssessmentStatus @($Data.Management) }
-        [PSCustomObject]@{ Section = 'Lifecycle Management'; Status = Get-AssessmentStatus @($Data.Firmware) }
+        [PSCustomObject]@{ Section = 'Remote Support'; Status = Get-RemoteSupportAssessmentStatus @((Get-ObjectProperty $Data 'RemoteSupportRegistration' @())) }
+        [PSCustomObject]@{ Section = 'Security Dashboard'; Status = if ($securityEvents.Count -gt 0) { Get-AssessmentStatus $securityEvidence } else { Get-SecurityAssessmentStatus $securityDashboard } }
     )
+    return @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Status) })
 }
 
 function Get-RecommendedActionText {
@@ -896,14 +1166,14 @@ function Get-RecommendedActionText {
     )
 
     $actions = [Collections.Generic.List[string]]::new()
-    if (@($Assessment | Where-Object { $_.Section -eq 'Security' -and $_.Status -eq 'CRITICAL' }).Count -gt 0) {
+    if (@($Assessment | Where-Object { $_.Section -eq 'Security Dashboard' -and $_.Status -eq 'CRITICAL' }).Count -gt 0) {
         $actions.Add('Review the iLO Security Dashboard and remediate all active security risks.')
     }
     if (@(Get-CriticalRecentEventLogs $Data).Count -gt 0) {
         $actions.Add('Investigate and resolve the critical iLO event-log entries recorded during the previous month.')
     }
     $otherCritical = @($Assessment | Where-Object {
-        $_.Status -eq 'CRITICAL' -and $_.Section -notin @('Administration', 'Security')
+        $_.Status -eq 'CRITICAL' -and $_.Section -ne 'Security Dashboard'
     } | Select-Object -ExpandProperty Section)
     if ($otherCritical.Count -gt 0) {
         $actions.Add("Review and remediate the critical findings in: $($otherCritical -join ', ').")
@@ -1022,7 +1292,7 @@ function Add-WordTable {
             $cell.Range.Text = [string]$value
             $cell.Range.Font.Name = 'Aptos'
             $cell.Range.Font.Size = 9
-            $statusColumns = @('Health', 'Severity', 'State', 'Security status', 'SecurityStatus')
+            $statusColumns = @('Health', 'Status', 'Severity', 'State', 'Security status', 'SecurityStatus', 'Registration')
             $cell.Range.Font.Bold = if ($name -in $statusColumns) { -1 } else { 0 }
             $cell.Range.Font.Color = if ($name -in $statusColumns) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
             if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe }
@@ -1045,7 +1315,8 @@ function Add-AssessmentSummaryTable {
     )
 
     $range = Get-EndRange $Document
-    $table = $Document.Tables.Add($range, 8, 4)
+    $dataRowCount = [Math]::Max(1, [Math]::Ceiling($Assessment.Count / 2.0))
+    $table = $Document.Tables.Add($range, $dataRowCount + 1, 4)
     $table.Style = 'Table Grid'
     $table.AllowAutoFit = $false
     $table.PreferredWidthType = $script:WdPreferredWidthPoints
@@ -1064,10 +1335,17 @@ function Add-AssessmentSummaryTable {
     }
     $table.Rows.Item(1).HeadingFormat = -1
 
-    for ($row = 0; $row -lt 7; $row++) {
-        $left = $Assessment[$row * 2]
-        $right = $Assessment[($row * 2) + 1]
-        $values = @($left.Section, $left.Status, $right.Section, $right.Status)
+    for ($row = 0; $row -lt $dataRowCount; $row++) {
+        $leftIndex = $row * 2
+        $rightIndex = $leftIndex + 1
+        $left = if ($leftIndex -lt $Assessment.Count) { $Assessment[$leftIndex] } else { $null }
+        $right = if ($rightIndex -lt $Assessment.Count) { $Assessment[$rightIndex] } else { $null }
+        $values = @(
+            $(if ($null -ne $left) { $left.Section } else { '' }),
+            $(if ($null -ne $left) { $left.Status } else { '' }),
+            $(if ($null -ne $right) { $right.Section } else { '' }),
+            $(if ($null -ne $right) { $right.Status } else { '' })
+        )
         for ($column = 1; $column -le 4; $column++) {
             $cell = $table.Cell($row + 2, $column)
             $cell.Range.Text = [string]$values[$column - 1]
@@ -1218,7 +1496,7 @@ function Get-OpenXmlStatusColor {
     switch -Regex ([string]$Status) {
         '^(CRITICAL|Critical|Failed|Fatal|Risk)$' { return 'C00000' }
         '^(RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
-        '^(HEALTHY|OK|Ok|Enabled)$' { return '00843D' }
+        '^(HEALTHY|OK|Ok|Enabled|Connected)$' { return '00843D' }
         default { return '666666' }
     }
 }
@@ -1368,50 +1646,95 @@ function New-OpenXmlHealthReport {
     [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-    $assessmentRows = for ($index = 0; $index -lt 7; $index++) {
+    $assessmentRowCount = [Math]::Max(1, [Math]::Ceiling($assessment.Count / 2.0))
+    $assessmentRows = for ($index = 0; $index -lt $assessmentRowCount; $index++) {
+        $leftIndex = $index * 2
+        $rightIndex = $leftIndex + 1
+        $left = if ($leftIndex -lt $assessment.Count) { $assessment[$leftIndex] } else { $null }
+        $right = if ($rightIndex -lt $assessment.Count) { $assessment[$rightIndex] } else { $null }
         [PSCustomObject][ordered]@{
-            Assessment = $assessment[$index * 2].Section
-            Status = $assessment[$index * 2].Status
-            'Assessment ' = $assessment[($index * 2) + 1].Section
-            'Status ' = $assessment[($index * 2) + 1].Status
+            Assessment = if ($null -ne $left) { $left.Section } else { '' }
+            Status = if ($null -ne $left) { $left.Status } else { '' }
+            'Assessment ' = if ($null -ne $right) { $right.Section } else { '' }
+            'Status ' = if ($null -ne $right) { $right.Status } else { '' }
         }
     }
     [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Status', 'Assessment ', 'Status ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
 
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading2' -Before 140 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-    $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
-        [PSCustomObject][ordered]@{ Item = $_.Key; Value = $_.Value }
-    })
-    if ($summaryRows.Count -gt 0) {
-        [void]$body.Add((New-OpenXmlTable -Rows $summaryRows -Columns @('Item', 'Value') -Widths @(2700, 6660) -StatusColumns))
-    }
-
-    $sections = @(
-        @('Power & Thermal - Temperatures', 'Temperatures'),
-        @('Power & Thermal - Fans', 'Fans'),
-        @('Power & Thermal - Power Supplies', 'PowerSupplies'),
-        @('Storage Controllers, Drives & Volumes', 'Storage'),
-        @('Memory', 'Memory'),
-        @('Processors', 'Processors'),
-        @('Firmware & OS Software', 'Firmware'),
-        @('iLO Dedicated Network Port', 'IloDedicatedNetworkPort'),
-        @('iLO Shared Network Port', 'IloSharedNetworkPort'),
-        @('Management', 'Management'),
-        @('Security Dashboard', 'SecurityDashboard'),
-        @('Administration - Event Logs', 'EventLogs')
-    )
-    foreach ($item in $sections) {
-        $property = $Data.PSObject.Properties[$item[1]]
-        if ($null -eq $property) { continue }
-        if ($item[1] -eq 'EventLogs') {
-            $records = @(Get-CriticalRecentEventLogs $Data)
-        }
-        else {
-            $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
-        }
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+    foreach ($item in @(
+        @('Server', 'ServerStatus', $true),
+        @('iLO', 'IloInformation', $false),
+        @('Status', 'StatusInformation', $false),
+        @('HPE Compute Ops Management', 'ComputeOpsManagement', $false)
+    )) {
+        $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
         if ($records.Count -eq 0) { continue }
         [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-        [void]$body.Add((New-OpenXmlTable -Rows $records -StatusColumns))
+        $tableArguments = @{ Rows = $records; StatusColumns = $true }
+        if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(2700, 6660) }
+        [void]$body.Add((New-OpenXmlTable @tableArguments))
+    }
+
+    $remoteSupportRows = @(Get-ReportRecords -Data $Data -PropertyName 'RemoteSupportRegistration')
+    if ($remoteSupportRows.Count -gt 0) {
+        $registrationRows = @(Get-ReportPropertyRows $remoteSupportRows[0])
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Remote Support' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Registration' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+        [void]$body.Add((New-OpenXmlTable -Rows $registrationRows -Columns @('Item', 'Value') -Widths @(2700, 6660) -StatusColumns))
+    }
+
+    $securityRows = @(Get-ReportRecords -Data $Data -PropertyName 'SecurityDashboard')
+    if ($securityRows.Count -gt 0) {
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Security Dashboard' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+        [void]$body.Add((New-OpenXmlTable -Rows $securityRows -StatusColumns))
+    }
+
+    $systemSections = @(
+        @('Summary', 'ServerStatus', $true),
+        @('Processors', 'Processors', $false),
+        @('Memory', 'Memory', $false),
+        @('Network', 'SystemNetwork', $false),
+        @('Device Inventory', 'DeviceInventory', $false),
+        @('Storage', 'Storage', $false)
+    )
+    $systemSectionRecords = @($systemSections | ForEach-Object {
+        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -PropertyMap:([bool]$_[2])), [bool]$_[2])
+    })
+    if (@($systemSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
+        [void]$body.Add((New-OpenXmlParagraph -Text 'System Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+        foreach ($item in $systemSectionRecords) {
+            $records = @($item[1])
+            if ($records.Count -eq 0) { continue }
+            [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+            $tableArguments = @{ Rows = $records; StatusColumns = $true }
+            if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(2700, 6660) }
+            [void]$body.Add((New-OpenXmlTable @tableArguments))
+        }
+    }
+
+    $firmwareRows = @(Get-ReportRecords -Data $Data -PropertyName 'Firmware')
+    if ($firmwareRows.Count -gt 0) {
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Firmware & OS Software' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+        [void]$body.Add((New-OpenXmlTable -Rows $firmwareRows -StatusColumns))
+    }
+
+    $powerSections = @(
+        @('Power Supply', 'PowerSupplies'),
+        @('Fans', 'Fans'),
+        @('Temperatures', 'Temperatures')
+    )
+    $powerSectionRecords = @($powerSections | ForEach-Object {
+        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1]))
+    })
+    if (@($powerSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Power & Thermal' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+        foreach ($item in $powerSectionRecords) {
+            $records = @($item[1])
+            if ($records.Count -eq 0) { continue }
+            [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+            [void]$body.Add((New-OpenXmlTable -Rows $records -StatusColumns))
+        }
     }
 
     if (@($Data.CollectionNotes).Count -gt 0) {
@@ -1547,36 +1870,84 @@ function New-WordHealthReport {
         Add-WordHeading $document 'Assessment Summary' 2
         Add-AssessmentSummaryTable $document $assessment
 
-        Add-WordHeading $document 'Information' 2
-        $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
-            [PSCustomObject][ordered]@{ Item = $_.Key; Value = $_.Value }
-        })
-        Add-WordTable $document $summaryRows 'Server status was not available.'
-
-        $sections = @(
-            @('Power & Thermal - Temperatures', 'Temperatures'),
-            @('Power & Thermal - Fans', 'Fans'),
-            @('Power & Thermal - Power Supplies', 'PowerSupplies'),
-            @('Storage Controllers, Drives & Volumes', 'Storage'),
-            @('Memory', 'Memory'),
-            @('Processors', 'Processors'),
-            @('Firmware & OS Software', 'Firmware'),
-            @('iLO Dedicated Network Port', 'IloDedicatedNetworkPort'),
-            @('iLO Shared Network Port', 'IloSharedNetworkPort'),
-            @('Management', 'Management'),
-            @('Security Dashboard', 'SecurityDashboard'),
-            @('Administration - Event Logs', 'EventLogs')
-        )
-        foreach ($item in $sections) {
-            if ($item[1] -eq 'EventLogs') {
-                $records = @(Get-CriticalRecentEventLogs $Data)
-            }
-            else {
-                $records = @($Data.PSObject.Properties[$item[1]].Value | Where-Object { Test-ReportRecordPresent $_ })
-            }
+        Add-WordHeading $document 'Information' 1
+        foreach ($item in @(
+            @('Server', 'ServerStatus', $true),
+            @('iLO', 'IloInformation', $false),
+            @('Status', 'StatusInformation', $false),
+            @('HPE Compute Ops Management', 'ComputeOpsManagement', $false)
+        )) {
+            $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
             if ($records.Count -eq 0) { continue }
             Add-WordHeading $document $item[0] 2
             Add-WordTable $document $records 'No records were returned.'
+        }
+
+        $remoteSupportRows = @(Get-ReportRecords -Data $Data -PropertyName 'RemoteSupportRegistration')
+        if ($remoteSupportRows.Count -gt 0) {
+            $registrationRows = @(Get-ReportPropertyRows $remoteSupportRows[0])
+            Add-WordHeading $document 'Remote Support' 1
+            Add-WordHeading $document 'Registration' 2
+            Add-WordTable $document $registrationRows 'No Remote Support registration data was returned.'
+        }
+
+        $securityRows = @(Get-ReportRecords -Data $Data -PropertyName 'SecurityDashboard')
+        if ($securityRows.Count -gt 0) {
+            Add-WordHeading $document 'Security Dashboard' 1
+            Add-WordTable $document $securityRows 'No Security Dashboard data was returned.'
+        }
+
+        $systemSections = @(
+            @('Summary', 'ServerStatus', $true),
+            @('Processors', 'Processors', $false),
+            @('Memory', 'Memory', $false),
+            @('Network', 'SystemNetwork', $false),
+            @('Device Inventory', 'DeviceInventory', $false),
+            @('Storage', 'Storage', $false)
+        )
+        $hasSystemInformation = $false
+        foreach ($item in $systemSections) {
+            if (@(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2])).Count -gt 0) {
+                $hasSystemInformation = $true
+                break
+            }
+        }
+        if ($hasSystemInformation) {
+            Add-WordHeading $document 'System Information' 1
+            foreach ($item in $systemSections) {
+                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
+                if ($records.Count -eq 0) { continue }
+                Add-WordHeading $document $item[0] 2
+                Add-WordTable $document $records 'No records were returned.'
+            }
+        }
+
+        $firmwareRows = @(Get-ReportRecords -Data $Data -PropertyName 'Firmware')
+        if ($firmwareRows.Count -gt 0) {
+            Add-WordHeading $document 'Firmware & OS Software' 1
+            Add-WordTable $document $firmwareRows 'No firmware data was returned.'
+        }
+
+        $powerSections = @(
+            @('Power Supply', 'PowerSupplies'),
+            @('Fans', 'Fans'),
+            @('Temperatures', 'Temperatures')
+        )
+        $hasPowerThermal = $false
+        foreach ($item in $powerSections) {
+            if (@(Get-ReportRecords -Data $Data -PropertyName $item[1]).Count -gt 0) {
+                $hasPowerThermal = $true
+                break
+            }
+        }
+        if ($hasPowerThermal) {
+            Add-WordHeading $document 'Power & Thermal' 1
+            foreach ($item in $powerSections) {
+                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1])
+                if ($records.Count -eq 0) { continue }
+                Add-WordHeading $document $item[0] 2
+                Add-WordTable $document $records 'No records were returned.'
+            }
         }
 
         if (@($Data.CollectionNotes).Count -gt 0) {
