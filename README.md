@@ -1,7 +1,7 @@
 # HP iLO 5 Health Check Report
 
-Generate a Microsoft Word health report for an HPE iLO 5 server with
-PowerShell and the Redfish API.
+Generate a Word-compatible health report for an HPE iLO 5 server with
+PowerShell and the Redfish API. Microsoft Word is optional.
 
 The report covers:
 
@@ -31,7 +31,8 @@ manager identifier.
 
 - Windows 10, Windows 11, or Windows Server
 - Windows PowerShell 5.1 or PowerShell 7
-- Desktop Microsoft Word (used to create the `.docx` report)
+- Desktop Microsoft Word is optional. When it is unavailable, the script uses
+  its built-in Open XML generator to create the `.docx` directly.
 - HTTPS network access to the iLO management interface
 - An iLO account with read access to the requested Redfish resources
 
@@ -90,8 +91,8 @@ Run the smoke tests with PowerShell:
 pwsh -NoProfile -File ./tests/Smoke.Tests.ps1
 ```
 
-The smoke tests validate script parsing and pure data-shaping helpers without
-contacting an iLO or starting Microsoft Word.
+The smoke tests validate script parsing, pure data-shaping helpers, and the
+built-in DOCX package without contacting an iLO or starting Microsoft Word.
 
 ## References
 

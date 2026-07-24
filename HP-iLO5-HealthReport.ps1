@@ -5,7 +5,8 @@ Creates a Microsoft Word health report for an HPE iLO 5 server.
 .DESCRIPTION
 Uses Redfish session authentication, dynamically follows advertised resource
 links, collects read-only health information, and creates a formatted .docx
-report through Microsoft Word COM automation.
+report. Microsoft Word COM automation is used when available; otherwise the
+script creates the DOCX directly with its built-in Open XML generator.
 #>
 
 [CmdletBinding()]
@@ -1038,6 +1039,339 @@ function Add-WordCover {
     $breakRange.InsertBreak($script:WdPageBreak)
 }
 
+function ConvertTo-OpenXmlText {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return '' }
+    return [Security.SecurityElement]::Escape([string]$Value)
+}
+
+function New-OpenXmlRun {
+    param(
+        [AllowNull()][object]$Text,
+        [string]$Font = 'Aptos',
+        [double]$Size = 10,
+        [string]$Color = '222222',
+        [switch]$Bold,
+        [switch]$Italic
+    )
+
+    $properties = @(
+        '<w:rFonts w:ascii="' + $Font + '" w:hAnsi="' + $Font + '"/>'
+        '<w:sz w:val="' + [int]($Size * 2) + '"/>'
+        '<w:szCs w:val="' + [int]($Size * 2) + '"/>'
+        '<w:color w:val="' + $Color + '"/>'
+    )
+    if ($Bold) { $properties += '<w:b/>' }
+    if ($Italic) { $properties += '<w:i/>' }
+    return '<w:r><w:rPr>' + ($properties -join '') + '</w:rPr><w:t xml:space="preserve">' +
+        (ConvertTo-OpenXmlText $Text) + '</w:t></w:r>'
+}
+
+function New-OpenXmlParagraph {
+    param(
+        [AllowNull()][object]$Text,
+        [string]$Style = 'Normal',
+        [string]$Alignment = 'left',
+        [int]$Before = 0,
+        [int]$After = 120,
+        [switch]$Bold,
+        [switch]$Italic,
+        [string]$Color = '222222',
+        [double]$Size = 10,
+        [switch]$KeepNext,
+        [switch]$PageBreakAfter
+    )
+
+    $paragraphProperties = @(
+        '<w:pStyle w:val="' + $Style + '"/>'
+        '<w:jc w:val="' + $Alignment + '"/>'
+        '<w:spacing w:before="' + $Before + '" w:after="' + $After + '" w:line="276" w:lineRule="auto"/>'
+    )
+    if ($KeepNext) { $paragraphProperties += '<w:keepNext/>' }
+    $xml = '<w:p><w:pPr>' + ($paragraphProperties -join '') + '</w:pPr>' +
+        (New-OpenXmlRun -Text $Text -Size $Size -Color $Color -Bold:$Bold -Italic:$Italic)
+    if ($PageBreakAfter) { $xml += '<w:r><w:br w:type="page"/></w:r>' }
+    return $xml + '</w:p>'
+}
+
+function Get-OpenXmlStatusColor {
+    param([AllowNull()][object]$Status)
+
+    switch -Regex ([string]$Status) {
+        '^(CRITICAL|Critical|Failed|Fatal|Risk)$' { return 'C00000' }
+        '^(RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
+        '^(HEALTHY|OK|Ok|Enabled)$' { return '00843D' }
+        default { return '666666' }
+    }
+}
+
+function New-OpenXmlCell {
+    param(
+        [AllowNull()][object]$Value,
+        [int]$Width,
+        [string]$Fill = 'FFFFFF',
+        [string]$Color = '222222',
+        [switch]$Bold,
+        [string]$Alignment = 'left',
+        [double]$Size = 8.5
+    )
+
+    $verticalAlignment = if ($Alignment -eq 'center') { 'center' } else { 'left' }
+    return @"
+<w:tc><w:tcPr><w:tcW w:w="$Width" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="$Fill"/><w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:jc w:val="$verticalAlignment"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>$(New-OpenXmlRun -Text $Value -Size $Size -Color $Color -Bold:$Bold)</w:p></w:tc>
+"@
+}
+
+function Get-OpenXmlColumnWidths {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [Parameter(Mandatory)][string[]]$Columns,
+        [int]$TotalWidth = 9360
+    )
+
+    if ($Columns.Count -eq 1) { return ,$TotalWidth }
+    $weights = foreach ($column in $Columns) {
+        $maximum = [Math]::Max(8, [Math]::Min(32, $column.Length))
+        foreach ($row in $Rows | Select-Object -First 30) {
+            $valueLength = ([string]$row.$column).Length
+            $maximum = [Math]::Max($maximum, [Math]::Min(32, $valueLength))
+        }
+        $maximum
+    }
+    $minimumWidth = if ($Columns.Count -le 8) { 900 } else {
+        [int][Math]::Floor(($TotalWidth / $Columns.Count) * 0.80)
+    }
+    $remainingWidth = $TotalWidth - ($minimumWidth * $Columns.Count)
+    $weightTotal = ($weights | Measure-Object -Sum).Sum
+    $widths = @($weights | ForEach-Object {
+        $minimumWidth + [int][Math]::Floor($remainingWidth * ($_ / $weightTotal))
+    })
+    $currentTotal = ($widths | Measure-Object -Sum).Sum
+    if ($currentTotal -ne $TotalWidth) {
+        $widths[$widths.Count - 1] += ($TotalWidth - $currentTotal)
+    }
+    return $widths
+}
+
+function New-OpenXmlTable {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [string[]]$Columns,
+        [int[]]$Widths,
+        [switch]$StatusColumns
+    )
+
+    if (-not $Columns -or $Columns.Count -eq 0) {
+        $Columns = @($Rows[0].PSObject.Properties.Name)
+    }
+    if (-not $Widths -or $Widths.Count -ne $Columns.Count) {
+        $Widths = @(Get-OpenXmlColumnWidths -Rows $Rows -Columns $Columns)
+    }
+
+    $grid = ($Widths | ForEach-Object { '<w:gridCol w:w="' + $_ + '"/>' }) -join ''
+    $headerCells = for ($index = 0; $index -lt $Columns.Count; $index++) {
+        New-OpenXmlCell -Value $Columns[$index] -Width $Widths[$index] -Fill '005F9E' -Color 'FFFFFF' -Bold -Size 8.5
+    }
+    $tableRows = @(
+        '<w:tr><w:trPr><w:tblHeader/></w:trPr>' + ($headerCells -join '') + '</w:tr>'
+    )
+    for ($rowIndex = 0; $rowIndex -lt $Rows.Count; $rowIndex++) {
+        $fill = if ($rowIndex % 2 -eq 1) { 'EEF4F8' } else { 'FFFFFF' }
+        $cells = for ($columnIndex = 0; $columnIndex -lt $Columns.Count; $columnIndex++) {
+            $column = $Columns[$columnIndex]
+            $value = $Rows[$rowIndex].$column
+            $isStatus = $StatusColumns -and ($column -match '(?i)status|health|state|severity')
+            $alignment = if ($isStatus) { 'center' } else { 'left' }
+            $color = if ($isStatus) { Get-OpenXmlStatusColor $value } else { '222222' }
+            New-OpenXmlCell -Value $value -Width $Widths[$columnIndex] -Fill $fill -Color $color -Bold:$isStatus -Alignment $alignment
+        }
+        $tableRows += '<w:tr>' + ($cells -join '') + '</w:tr>'
+    }
+
+    return @"
+<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblInd w:w="120" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="80" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="4" w:color="C8D5DF"/><w:left w:val="single" w:sz="4" w:color="C8D5DF"/><w:bottom w:val="single" w:sz="4" w:color="C8D5DF"/><w:right w:val="single" w:sz="4" w:color="C8D5DF"/><w:insideH w:val="single" w:sz="4" w:color="DCE5EB"/><w:insideV w:val="single" w:sz="4" w:color="DCE5EB"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
+$(New-OpenXmlParagraph -Text '' -After 80 -Size 2)
+"@
+}
+
+function New-OpenXmlBulletParagraph {
+    param([Parameter(Mandatory)][string]$Text)
+
+    return '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:after="80" w:line="276" w:lineRule="auto"/></w:pPr>' +
+        (New-OpenXmlRun -Text $Text -Size 9 -Color '666666') + '</w:p>'
+}
+
+function Add-OpenXmlPackageEntry {
+    param(
+        [Parameter(Mandatory)][object]$Archive,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Content
+    )
+
+    $entry = $Archive.CreateEntry($Path)
+    $stream = $entry.Open()
+    $writer = $null
+    try {
+        $writer = New-Object IO.StreamWriter($stream, (New-Object Text.UTF8Encoding($false)))
+        $writer.Write($Content)
+    }
+    finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        else { $stream.Dispose() }
+    }
+}
+
+function New-OpenXmlHealthReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Data,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][string]$CustomerName
+    )
+
+    $resolved = [IO.Path]::GetFullPath($OutputPath)
+    $directory = Split-Path -Parent $resolved
+    if (-not (Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+
+    $reportDate = Get-Date -Format 'MMMM d, yyyy'
+    $displayTarget = ([uri]$Data.Target).Host
+    $assessment = @(New-AssessmentSummary $Data)
+    $score = Get-OverallHealthScore $assessment
+    $critical = @($assessment | Where-Object Status -eq 'CRITICAL').Count
+    $recommended = @($assessment | Where-Object Status -eq 'RECOMMENDED').Count
+    $action = if ($critical -gt 0) { 'Action Required' } elseif ($recommended -gt 0) { 'Review Recommended' } else { 'Healthy' }
+    $body = [Collections.Generic.List[string]]::new()
+
+    [void]$body.Add((New-OpenXmlParagraph -Text 'HP iLO Health Check' -Style 'Title' -Alignment center -Before 2300 -After 180 -Bold -Color '005F9E' -Size 28))
+    [void]$body.Add((New-OpenXmlParagraph -Text $displayTarget -Style 'Subtitle' -Alignment center -After 100 -Color '203647' -Size 20))
+    [void]$body.Add((New-OpenXmlParagraph -Text $CustomerName -Style 'Subtitle' -Alignment center -After 100 -Color '203647' -Size 16))
+    [void]$body.Add((New-OpenXmlParagraph -Text $reportDate -Alignment center -After 80 -Color '777777' -Size 12))
+    [void]$body.Add((New-OpenXmlParagraph -Text '[Confidential]' -Alignment center -After 0 -Italic -Color '999999' -Size 10 -PageBreakAfter))
+
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Executive Overview' -Style 'Heading1' -Before 0 -After 160 -Bold -Color '005F9E' -Size 16 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." -After 160 -Size 10.5))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    $assessmentRows = for ($index = 0; $index -lt 7; $index++) {
+        [PSCustomObject][ordered]@{
+            Assessment = $assessment[$index * 2].Section
+            Status = $assessment[$index * 2].Status
+            'Assessment ' = $assessment[($index * 2) + 1].Section
+            'Status ' = $assessment[($index * 2) + 1].Status
+        }
+    }
+    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Status', 'Assessment ', 'Status ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
+
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Overall Health Score' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    $scoreRows = @([PSCustomObject][ordered]@{
+        Score = "$score / 100"
+        Assessment = "$action | Critical sections: $critical | Recommended reviews: $recommended"
+    })
+    [void]$body.Add((New-OpenXmlTable -Rows $scoreRows -Columns @('Score', 'Assessment') -Widths @(1800, 7560) -StatusColumns))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Score is calculated from section-status evidence returned by Redfish.' -After 120 -Italic -Color '666666' -Size 8.5))
+
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading2' -Before 140 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
+        [PSCustomObject][ordered]@{ Item = $_.Key; Value = $_.Value }
+    })
+    if ($summaryRows.Count -gt 0) {
+        [void]$body.Add((New-OpenXmlTable -Rows $summaryRows -Columns @('Item', 'Value') -Widths @(2700, 6660) -StatusColumns))
+    }
+
+    $sections = @(
+        @('Power & Thermal - Temperatures', 'Temperatures'),
+        @('Power & Thermal - Fans', 'Fans'),
+        @('Power & Thermal - Power Supplies', 'PowerSupplies'),
+        @('Storage Controllers, Drives & Volumes', 'Storage'),
+        @('Memory', 'Memory'),
+        @('Processors', 'Processors'),
+        @('Firmware & OS Software', 'Firmware'),
+        @('Management', 'Management'),
+        @('Security Dashboard', 'SecurityDashboard'),
+        @('Administration - Event Logs', 'EventLogs')
+    )
+    foreach ($item in $sections) {
+        $property = $Data.PSObject.Properties[$item[1]]
+        if ($null -eq $property) { continue }
+        $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
+        if ($records.Count -eq 0) { continue }
+        [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+        [void]$body.Add((New-OpenXmlTable -Rows $records -StatusColumns))
+    }
+
+    if (@($Data.CollectionNotes).Count -gt 0) {
+        [void]$body.Add((New-OpenXmlParagraph -Text 'Collection Notes' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+        foreach ($note in $Data.CollectionNotes) {
+            [void]$body.Add((New-OpenXmlBulletParagraph -Text $note))
+        }
+    }
+
+    $documentXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>$($body -join '')<w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:footerReference w:type="default" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>
+"@
+    $stylesXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="222222"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos Display" w:hAnsi="Aptos Display"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="56"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:color w:val="203647"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="320" w:after="160"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos Display" w:hAnsi="Aptos Display"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="280" w:after="140"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos Display" w:hAnsi="Aptos Display"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="26"/></w:rPr></w:style></w:styles>
+"@
+    $numberingXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="540"/></w:tabs><w:ind w:left="540" w:hanging="260"/><w:spacing w:after="80" w:line="300" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="18"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>
+"@
+    $headerXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:after="80"/></w:pPr>$(New-OpenXmlRun -Text "HP iLO Check - $displayTarget - $CustomerName" -Size 8.5 -Color '506675')$(New-OpenXmlRun -Text "`t$reportDate" -Size 8.5 -Color '506675')</w:p></w:hdr>
+"@
+    $footerXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs><w:pBdr><w:top w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:before="80"/></w:pPr>$(New-OpenXmlRun -Text 'Confidential' -Size 8.5 -Color '888888' -Italic)$(New-OpenXmlRun -Text "`tPage " -Size 8.5 -Color '506675')<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>$(New-OpenXmlRun -Text ' of ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="NUMPAGES"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>
+"@
+    $contentTypes = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>
+"@
+    $rootRelationships = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>
+"@
+    $documentRelationships = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>
+"@
+    $created = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
+    $coreXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>HP iLO Health Check - $(ConvertTo-OpenXmlText $displayTarget)</dc:title><dc:creator>HP iLO 5 Health Check Report</dc:creator><cp:lastModifiedBy>HP iLO 5 Health Check Report</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">$created</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">$created</dcterms:modified></cp:coreProperties>
+"@
+    $appXml = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>HP iLO 5 Health Check Report</Application><AppVersion>1.0</AppVersion></Properties>
+"@
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $fileStream = [IO.File]::Open($resolved, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite)
+    $archive = $null
+    try {
+        $archive = New-Object IO.Compression.ZipArchive($fileStream, [IO.Compression.ZipArchiveMode]::Create, $false)
+        Add-OpenXmlPackageEntry $archive '[Content_Types].xml' $contentTypes
+        Add-OpenXmlPackageEntry $archive '_rels/.rels' $rootRelationships
+        Add-OpenXmlPackageEntry $archive 'word/document.xml' $documentXml
+        Add-OpenXmlPackageEntry $archive 'word/styles.xml' $stylesXml
+        Add-OpenXmlPackageEntry $archive 'word/numbering.xml' $numberingXml
+        Add-OpenXmlPackageEntry $archive 'word/_rels/document.xml.rels' $documentRelationships
+        Add-OpenXmlPackageEntry $archive 'word/header1.xml' $headerXml
+        Add-OpenXmlPackageEntry $archive 'word/footer1.xml' $footerXml
+        Add-OpenXmlPackageEntry $archive 'docProps/core.xml' $coreXml
+        Add-OpenXmlPackageEntry $archive 'docProps/app.xml' $appXml
+    }
+    finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        else { $fileStream.Dispose() }
+    }
+    return $resolved
+}
+
 function New-WordHealthReport {
     param(
         [Parameter(Mandatory)][object]$Data,
@@ -1045,11 +1379,19 @@ function New-WordHealthReport {
         [Parameter(Mandatory)][string]$CustomerName
     )
 
-    if ($env:OS -ne 'Windows_NT') { throw 'Microsoft Word report generation requires Windows.' }
+    if ($env:OS -ne 'Windows_NT') {
+        return New-OpenXmlHealthReport -Data $Data -OutputPath $OutputPath -CustomerName $CustomerName
+    }
     $word = $null
     $document = $null
     try {
-        $word = New-Object -ComObject Word.Application
+        try {
+            $word = New-Object -ComObject Word.Application
+        }
+        catch {
+            Write-Warning 'Microsoft Word is not installed. Creating the report with the built-in DOCX generator.'
+            return New-OpenXmlHealthReport -Data $Data -OutputPath $OutputPath -CustomerName $CustomerName
+        }
         $word.Visible = $false
         $word.DisplayAlerts = 0
         $document = $word.Documents.Add()
