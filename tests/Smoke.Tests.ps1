@@ -34,6 +34,8 @@ $resource = [PSCustomObject]@{
 }
 Assert-Equal (Get-HealthValue $resource) 'OK' 'Health extraction failed'
 Assert-Equal (Get-StateValue $resource) 'Enabled' 'State extraction failed'
+Assert-Equal (Get-HeaderValue @{ 'X-Auth-Token' = [string[]]@('test-token') } 'X-Auth-Token') 'test-token' 'Array response header was not reduced to a scalar value'
+Assert-Equal (Get-HeaderValue @{ Location = '/redfish/v1/SessionService/Sessions/1' } 'Location') '/redfish/v1/SessionService/Sessions/1' 'Scalar response header extraction failed'
 Assert-Equal (Get-RedfishLink $resource 'Memory') '/redfish/v1/Systems/1/Memory' 'Link extraction failed'
 Assert-Equal (Get-RedfishLinkAny $resource 'SecurityService') '/redfish/v1/Managers/1/SecurityService' 'Nested link extraction failed'
 Assert-Equal (Resolve-RedfishUri ([uri]'https://ilo.example.com/') '/redfish/v1/') 'https://ilo.example.com/redfish/v1/' 'URI resolution failed'

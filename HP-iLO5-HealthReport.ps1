@@ -54,6 +54,17 @@ function Get-ObjectProperty {
     return $property.Value
 }
 
+function Get-HeaderValue {
+    param(
+        [Parameter(Mandatory)][object]$Headers,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $values = @($Headers[$Name])
+    if ($values.Count -eq 0 -or $null -eq $values[0]) { return $null }
+    return [string]$values[0]
+}
+
 function Get-RedfishLink {
     param(
         [AllowNull()][object]$Resource,
@@ -132,13 +143,17 @@ function New-IloSession {
         $request.UseBasicParsing = $true
     }
     $response = Invoke-WebRequest @request
-    $token = $response.Headers['X-Auth-Token']
+    # PowerShell 7 returns header values as String[]. Passing that array back
+    # through -Headers sends the literal text "System.String[]" instead of the
+    # session token, which causes authenticated Redfish requests to return 401.
+    $token = Get-HeaderValue -Headers $response.Headers -Name 'X-Auth-Token'
     if (-not $token) { throw 'iLO did not return a Redfish session token.' }
+    $sessionUri = Get-HeaderValue -Headers $response.Headers -Name 'Location'
 
     [PSCustomObject]@{
         BaseUri = $BaseUri
         Headers = @{ Accept = 'application/json'; 'OData-Version' = '4.0'; 'X-Auth-Token' = $token }
-        SessionUri = [string]$response.Headers['Location']
+        SessionUri = $sessionUri
         TimeoutSec = $TimeoutSec
         IgnoreCertificateErrors = $IgnoreCertificateErrors
     }
