@@ -636,7 +636,7 @@ try {
     }
     Assert-Equal $script:customerNameObserved 'Prompted Customer' 'Missing customer name should be prompted for'
     Assert-Equal (Split-Path -Parent $script:outputPathObserved) (Split-Path -Parent $scriptPath) 'Default report path should use the script directory'
-    if ((Split-Path -Leaf $script:outputPathObserved) -notmatch '^ilo-health-192\.0\.2\.10-\d{8}-\d{6}\.docx$') {
+    if ((Split-Path -Leaf $script:outputPathObserved) -ne 'iLO Health Check - Prompted Customer - 192.0.2.10.docx') {
         throw "Default report filename is incorrect: $script:outputPathObserved"
     }
 }

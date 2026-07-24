@@ -17,12 +17,21 @@ The report covers:
 - Integrated Management Log, iLO Event Log, and other advertised log services
 - empty detail sections, `Unknown` or `Absent` fields, and hardware records
   reported as `Absent` are omitted
+- Memory and temperature rows containing `N/A` are omitted. Network rows with
+  no usable data are omitted, while adapters with an IP address remain visible.
+  Fan readings include a percent sign when applicable and do not show a Units
+  column.
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
 The Word output follows a two-part health-assessment format: a branded cover
 page followed by an Executive Overview with a Recommended Action,
 evidence-based Assessment Summary, and grouped detailed evidence tables. Sections
 with only `Unknown` or unavailable status data are not displayed or counted.
+Reports use narrow margins, the Winslow Tech Group logo in the upper-left
+header, the report identifier in the upper-right header, and a footer with
+`Confidential` on the left, the Winslow Tech Group copyright notice centered,
+and page numbering on the right. If the local logo file is unavailable, the
+script downloads it automatically from winslowtg.com.
 The former Lifecycle Management, Management, and Administration summary rows
 are not included. Storage evidence represents controllers, physical drives, and
 logical volumes when iLO advertises them. Event-log evidence is limited to
@@ -35,7 +44,9 @@ An `Ignored` Overall Security Status is treated as healthy, and individual
 Security Dashboard findings with `Ignore = True` remain excluded from negative
 assessment without displaying a separate Ignored column.
 HPE Compute Ops Management uses iLO's HPE `CloudConnect` status. The report
-does not include the GreenLake activation key.
+does not include the GreenLake activation key. Compute Ops Management is
+optional: `NotEnabled` remains visible in the Information details but does not
+make the Information assessment `RECOMMENDED`.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or
@@ -53,6 +64,12 @@ manager identifier.
 
 No extra PowerShell modules are required.
 
+## Example report
+
+The current report layout and table filtering are illustrated in
+[examples/sample-health-report.docx](examples/sample-health-report.docx).
+The sample uses placeholder infrastructure data only.
+
 ## Run
 
 Open PowerShell in the repository directory:
@@ -66,7 +83,8 @@ The script prompts for an iLO IP address or FQDN, customer name, and then
 displays the standard Windows credential prompt. The password is not echoed or
 saved in the report.
 When `-OutputPath` is omitted, the report is saved in the same folder as
-`HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory.
+`HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory. Its
+default filename is `iLO Health Check - Customer Name - IP-or-FQDN.docx`.
 
 Parameters can also be supplied directly:
 
