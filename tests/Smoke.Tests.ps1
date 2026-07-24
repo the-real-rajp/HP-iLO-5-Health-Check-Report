@@ -88,6 +88,7 @@ Add-CollectionNote -Notes $emptyNotes -Message $emptyNotes[0]
 Assert-Equal $emptyNotes.Count 1 'Duplicate collection notes should be suppressed'
 
 $assessmentData = [PSCustomObject]@{
+    GeneratedAt = '2026-07-24T12:00:00Z'
     ServerStatus = [ordered]@{ Health = 'OK'; State = 'Enabled' }
     Temperatures = @([PSCustomObject]@{ 'Upper critical (C)' = 42; Health = 'OK'; State = 'Enabled' })
     Fans = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
@@ -96,7 +97,11 @@ $assessmentData = [PSCustomObject]@{
     Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
-    EventLogs = @()
+    EventLogs = @(
+        [PSCustomObject]@{ Created = '2026-07-20T10:00:00Z'; Severity = 'Critical'; Log = 'Integrated Management Log'; Message = 'Recent critical event'; Repaired = $false }
+        [PSCustomObject]@{ Created = '2026-07-20T11:00:00Z'; Severity = 'Warning'; Log = 'Integrated Management Log'; Message = 'Recent warning event'; Repaired = $false }
+        [PSCustomObject]@{ Created = '2026-05-01T10:00:00Z'; Severity = 'Critical'; Log = 'Integrated Management Log'; Message = 'Old critical event'; Repaired = $false }
+    )
     SecurityDashboard = @([PSCustomObject]@{ 'Security status' = 'Ok'; Ignored = $false })
 }
 $assessment = @(New-AssessmentSummary $assessmentData)
@@ -112,12 +117,19 @@ Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'As
 Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
 Assert-Equal $assessment[5].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
 Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidence should be recommended'
+Assert-Equal $assessment[10].Status 'CRITICAL' 'A recent critical event should make Administration critical'
 Assert-Equal $assessment[11].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security assessment'
-Assert-Equal (Get-OverallHealthScore $assessment) 70 'Overall health score calculation failed'
+$criticalRecentEvents = @(Get-CriticalRecentEventLogs $assessmentData)
+Assert-Equal $criticalRecentEvents.Count 1 'Event-log report filtering should retain only recent critical events'
+Assert-Equal $criticalRecentEvents[0].Message 'Recent critical event' 'The wrong event survived report filtering'
+$recommendedAction = Get-RecommendedActionText -Data $assessmentData -Assessment $assessment
+if ($recommendedAction -notmatch 'critical iLO event-log entries') {
+    throw 'Recommended Action did not include the recent critical event guidance.'
+}
 
 $nativeReportData = [PSCustomObject]@{
     Target = 'https://192.0.2.10'
-    GeneratedAt = Get-Date
+    GeneratedAt = '2026-07-24T12:00:00Z'
     ServerStatus = [ordered]@{
         Name = 'Example ProLiant'
         Model = 'ProLiant DL380 Gen10'
@@ -178,13 +190,29 @@ $nativeReportData = [PSCustomObject]@{
         Ignored = $false
         'Recommended action' = ''
     })
-    EventLogs = @([PSCustomObject][ordered]@{
-        Created = '2026-07-24 10:00'
-        Severity = 'OK'
-        Log = 'Integrated Management Log'
-        Message = 'Example informational event.'
-        Repaired = $false
-    })
+    EventLogs = @(
+        [PSCustomObject][ordered]@{
+            Created = '2026-07-24T10:00:00Z'
+            Severity = 'Critical'
+            Log = 'Integrated Management Log'
+            Message = 'Recent critical event for report validation.'
+            Repaired = $false
+        }
+        [PSCustomObject][ordered]@{
+            Created = '2026-07-23T10:00:00Z'
+            Severity = 'Warning'
+            Log = 'Integrated Management Log'
+            Message = 'Recent warning event that must be omitted.'
+            Repaired = $false
+        }
+        [PSCustomObject][ordered]@{
+            Created = '2026-05-01T10:00:00Z'
+            Severity = 'Critical'
+            Log = 'Integrated Management Log'
+            Message = 'Old critical event that must be omitted.'
+            Repaired = $false
+        }
+    )
     CollectionNotes = @('Example report generated without Microsoft Word.')
 }
 $nativeReportPath = Join-Path ([IO.Path]::GetTempPath()) ('ilo-health-native-' + [guid]::NewGuid().ToString('N') + '.docx')
@@ -215,9 +243,14 @@ try {
         $reader = New-Object IO.StreamReader($documentEntry.Open())
         try { $documentText = $reader.ReadToEnd() }
         finally { $reader.Dispose() }
-        foreach ($expectedText in @('Assessment Summary', 'Overall Health Score', 'Security Dashboard')) {
+        foreach ($expectedText in @('Recommended Action', 'Assessment Summary', 'Security Dashboard', 'Recent critical event for report validation.')) {
             if ($documentText -notmatch [regex]::Escape($expectedText)) {
                 throw "Native DOCX is missing expected text: $expectedText."
+            }
+        }
+        foreach ($unexpectedText in @('Overall Health Score', 'Recent warning event that must be omitted.', 'Old critical event that must be omitted.')) {
+            if ($documentText -match [regex]::Escape($unexpectedText)) {
+                throw "Native DOCX contains text that should have been omitted: $unexpectedText."
             }
         }
     }
@@ -302,10 +335,20 @@ try {
     Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
     Assert-Equal $script:customerNameObserved 'Example Customer' 'Customer name forwarding failed'
 
-    Invoke-IloHealthReport `
-        -IloAddress '192.0.2.10' `
-        -Credential $credential `
-        -CustomerName 'Example Customer'
+    function Read-Host {
+        param([string]$Prompt)
+        if ($Prompt -eq 'Enter customer name') { return 'Prompted Customer' }
+        throw "Unexpected Read-Host prompt: $Prompt"
+    }
+    try {
+        Invoke-IloHealthReport `
+            -IloAddress '192.0.2.10' `
+            -Credential $credential
+    }
+    finally {
+        Remove-Item function:Read-Host -Force
+    }
+    Assert-Equal $script:customerNameObserved 'Prompted Customer' 'Missing customer name should be prompted for'
     Assert-Equal (Split-Path -Parent $script:outputPathObserved) (Split-Path -Parent $scriptPath) 'Default report path should use the script directory'
     if ((Split-Path -Leaf $script:outputPathObserved) -notmatch '^ilo-health-192\.0\.2\.10-\d{8}-\d{6}\.docx$') {
         throw "Default report filename is incorrect: $script:outputPathObserved"

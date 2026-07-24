@@ -16,7 +16,7 @@ param(
 
     [PSCredential]$Credential,
 
-    [string]$CustomerName = 'Customer',
+    [string]$CustomerName,
 
     [string]$OutputPath,
 
@@ -714,13 +714,40 @@ function Get-AssessmentStatus {
     return 'HEALTHY'
 }
 
+function Get-CriticalRecentEventLogs {
+    param([Parameter(Mandatory)][object]$Data)
+
+    $referenceTime = [DateTimeOffset]::Now
+    $generatedAt = Get-ObjectProperty -InputObject $Data -Name 'GeneratedAt'
+    if ($null -ne $generatedAt) {
+        $parsedReference = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$generatedAt, [ref]$parsedReference)) {
+            $referenceTime = $parsedReference
+        }
+    }
+    $cutoff = $referenceTime.AddMonths(-1)
+
+    return @(
+        foreach ($event in @(Get-ObjectProperty -InputObject $Data -Name 'EventLogs' -Default @())) {
+            $severity = [string](Get-ObjectProperty -InputObject $event -Name 'Severity' -Default '')
+            if ($severity -notmatch '(?i)^critical$') { continue }
+
+            $created = [DateTimeOffset]::MinValue
+            $createdText = [string](Get-ObjectProperty -InputObject $event -Name 'Created' -Default '')
+            if (-not [DateTimeOffset]::TryParse($createdText, [ref]$created)) { continue }
+            if ($created -lt $cutoff -or $created -gt $referenceTime) { continue }
+            $event
+        }
+    ) | Sort-Object {
+        [DateTimeOffset]::Parse([string](Get-ObjectProperty -InputObject $_ -Name 'Created'))
+    } -Descending
+}
+
 function New-AssessmentSummary {
     param([Parameter(Mandatory)][object]$Data)
 
-    $activeEvents = @($Data.EventLogs | Where-Object {
-        $_.Repaired -notin @($true, 'True', 'true')
-    })
-    $securityEvents = @($activeEvents | Where-Object {
+    $criticalRecentEvents = @(Get-CriticalRecentEventLogs $Data)
+    $securityEvents = @($criticalRecentEvents | Where-Object {
         $_.Log -match '(?i)security' -or $_.Message -match '(?i)security|unauthorized|authentication'
     })
     $securityEvidence = @((Get-ObjectProperty $Data 'SecurityDashboard' @())) + $securityEvents
@@ -738,18 +765,46 @@ function New-AssessmentSummary {
         [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'Remote Support'; Status = 'RECOMMENDED' }
-        [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $activeEvents }
+        [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $criticalRecentEvents }
         [PSCustomObject]@{ Section = 'Security'; Status = Get-AssessmentStatus $securityEvidence }
         [PSCustomObject]@{ Section = 'Management'; Status = Get-AssessmentStatus @($Data.Management) }
         [PSCustomObject]@{ Section = 'Lifecycle Management'; Status = Get-AssessmentStatus @($Data.Firmware) }
     )
 }
 
-function Get-OverallHealthScore {
-    param([Parameter(Mandatory)][object[]]$Assessment)
-    $critical = @($Assessment | Where-Object Status -eq 'CRITICAL').Count
-    $recommended = @($Assessment | Where-Object Status -eq 'RECOMMENDED').Count
-    return [Math]::Max(0, 100 - ($critical * 15) - ($recommended * 5))
+function Get-RecommendedActionText {
+    param(
+        [Parameter(Mandatory)][object]$Data,
+        [Parameter(Mandatory)][object[]]$Assessment
+    )
+
+    $actions = [Collections.Generic.List[string]]::new()
+    $securityDashboard = @(Get-ObjectProperty -InputObject $Data -Name 'SecurityDashboard' -Default @())
+    foreach ($finding in $securityDashboard) {
+        $ignored = [bool](Get-ObjectProperty -InputObject $finding -Name 'Ignored' -Default $false)
+        $status = [string](Get-ObjectProperty -InputObject $finding -Name 'Security status' -Default '')
+        if ($ignored -or $status -notmatch '(?i)risk|critical|warning') { continue }
+        $recommendation = [string](Get-ObjectProperty -InputObject $finding -Name 'Recommended action' -Default '')
+        if ($recommendation -and -not $actions.Contains($recommendation)) {
+            $actions.Add($recommendation)
+        }
+    }
+    if (@(Get-CriticalRecentEventLogs $Data).Count -gt 0) {
+        $actions.Add('Investigate and resolve the critical iLO event-log entries recorded during the previous month.')
+    }
+    $otherCritical = @($Assessment | Where-Object {
+        $_.Status -eq 'CRITICAL' -and $_.Section -notin @('Administration', 'Security')
+    } | Select-Object -ExpandProperty Section)
+    if ($otherCritical.Count -gt 0) {
+        $actions.Add("Review and remediate the critical findings in: $($otherCritical -join ', ').")
+    }
+    if (@($Assessment | Where-Object Status -eq 'RECOMMENDED').Count -gt 0) {
+        $actions.Add('Review the sections marked RECOMMENDED in the Assessment Summary and validate unavailable or uncollected configuration areas.')
+    }
+    if ($actions.Count -eq 0) {
+        $actions.Add('No immediate corrective action is required. Continue routine monitoring and periodic health checks.')
+    }
+    return $actions -join ' '
 }
 
 function Get-EndRange {
@@ -927,54 +982,6 @@ function Add-AssessmentSummaryTable {
     $table.BottomPadding = 4
     $table.LeftPadding = 6
     $table.RightPadding = 6
-    $afterTable = $table.Range
-    $afterTable.Collapse(0)
-    $afterTable.InsertParagraphAfter()
-}
-
-function Add-OverallHealthScore {
-    param(
-        [Parameter(Mandatory)][object]$Document,
-        [Parameter(Mandatory)][object[]]$Assessment
-    )
-
-    $score = Get-OverallHealthScore $Assessment
-    $critical = @($Assessment | Where-Object Status -eq 'CRITICAL').Count
-    $recommended = @($Assessment | Where-Object Status -eq 'RECOMMENDED').Count
-    $action = if ($critical -gt 0) { 'Action Required' } elseif ($recommended -gt 0) { 'Review Recommended' } else { 'Healthy' }
-
-    $range = Get-EndRange $Document
-    $table = $Document.Tables.Add($range, 1, 2)
-    $table.Style = 'Table Grid'
-    $table.AllowAutoFit = $false
-    $table.PreferredWidthType = $script:WdPreferredWidthPoints
-    $table.PreferredWidth = 540
-    $table.Columns.Item(1).Width = 180
-    $table.Columns.Item(2).Width = 360
-    $scoreCell = $table.Cell(1, 1)
-    $scoreCell.Range.Text = "$score`r/ 100"
-    $scoreCell.Range.Font.Name = 'Aptos Display'
-    $scoreCell.Range.Font.Size = 18
-    $scoreCell.Range.Font.Bold = -1
-    $scoreCell.Range.Font.Color = ConvertTo-WordColor 'FFFFFF'
-    $scoreCell.Range.ParagraphFormat.Alignment = 1
-    $scoreCell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportBlue
-    $scoreCell.VerticalAlignment = 1
-
-    $detailCell = $table.Cell(1, 2)
-    $detailCell.Range.Text = "$action`rCritical sections: $critical    Recommended reviews: $recommended`rScore is calculated from section status evidence returned by Redfish."
-    $detailCell.Range.Font.Name = 'Aptos'
-    $detailCell.Range.Font.Size = 10
-    $detailCell.Range.Paragraphs.Item(1).Range.Font.Size = 13
-    $detailCell.Range.Paragraphs.Item(1).Range.Font.Bold = -1
-    $detailCell.Range.Paragraphs.Item(1).Range.Font.Color = Get-StatusColor $(if ($critical -gt 0) { 'CRITICAL' } elseif ($recommended -gt 0) { 'RECOMMENDED' } else { 'HEALTHY' })
-    $detailCell.Range.Paragraphs.Item(3).Range.Font.Italic = -1
-    $detailCell.Range.Paragraphs.Item(3).Range.Font.Color = ConvertTo-WordColor $script:ReportDark
-    $detailCell.VerticalAlignment = 1
-    $table.TopPadding = 6
-    $table.BottomPadding = 6
-    $table.LeftPadding = 8
-    $table.RightPadding = 8
     $afterTable = $table.Range
     $afterTable.Collapse(0)
     $afterTable.InsertParagraphAfter()
@@ -1237,10 +1244,7 @@ function New-OpenXmlHealthReport {
     $reportDate = Get-Date -Format 'MMMM d, yyyy'
     $displayTarget = ([uri]$Data.Target).Host
     $assessment = @(New-AssessmentSummary $Data)
-    $score = Get-OverallHealthScore $assessment
-    $critical = @($assessment | Where-Object Status -eq 'CRITICAL').Count
-    $recommended = @($assessment | Where-Object Status -eq 'RECOMMENDED').Count
-    $action = if ($critical -gt 0) { 'Action Required' } elseif ($recommended -gt 0) { 'Review Recommended' } else { 'Healthy' }
+    $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
     $body = [Collections.Generic.List[string]]::new()
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'HP iLO Health Check' -Style 'Title' -Alignment center -Before 2300 -After 180 -Bold -Color '005F9E' -Size 28))
@@ -1251,6 +1255,8 @@ function New-OpenXmlHealthReport {
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Executive Overview' -Style 'Heading1' -Before 0 -After 160 -Bold -Color '005F9E' -Size 16 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." -After 160 -Size 10.5))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     $assessmentRows = for ($index = 0; $index -lt 7; $index++) {
         [PSCustomObject][ordered]@{
@@ -1261,14 +1267,6 @@ function New-OpenXmlHealthReport {
         }
     }
     [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Status', 'Assessment ', 'Status ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
-
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Overall Health Score' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-    $scoreRows = @([PSCustomObject][ordered]@{
-        Score = "$score / 100"
-        Assessment = "$action | Critical sections: $critical | Recommended reviews: $recommended"
-    })
-    [void]$body.Add((New-OpenXmlTable -Rows $scoreRows -Columns @('Score', 'Assessment') -Widths @(1800, 7560) -StatusColumns))
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Score is calculated from section-status evidence returned by Redfish.' -After 120 -Italic -Color '666666' -Size 8.5))
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading2' -Before 140 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
@@ -1293,7 +1291,12 @@ function New-OpenXmlHealthReport {
     foreach ($item in $sections) {
         $property = $Data.PSObject.Properties[$item[1]]
         if ($null -eq $property) { continue }
-        $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
+        if ($item[1] -eq 'EventLogs') {
+            $records = @(Get-CriticalRecentEventLogs $Data)
+        }
+        else {
+            $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
+        }
         if ($records.Count -eq 0) { continue }
         [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
         [void]$body.Add((New-OpenXmlTable -Rows $records -StatusColumns))
@@ -1426,10 +1429,11 @@ function New-WordHealthReport {
         Add-WordParagraph $document "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." 11 $false '222222' 2
 
         $assessment = @(New-AssessmentSummary $Data)
+        $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
+        Add-WordHeading $document 'Recommended Action' 2
+        Add-WordParagraph $document $recommendedAction 11 $false '222222' 6
         Add-WordHeading $document 'Assessment Summary' 2
         Add-AssessmentSummaryTable $document $assessment
-        Add-WordHeading $document 'Overall Health Score' 2
-        Add-OverallHealthScore $document $assessment
 
         Add-WordHeading $document 'Information' 2
         $summaryRows = @($Data.ServerStatus.GetEnumerator() | ForEach-Object {
@@ -1450,7 +1454,12 @@ function New-WordHealthReport {
             @('Administration - Event Logs', 'EventLogs')
         )
         foreach ($item in $sections) {
-            $records = @($Data.PSObject.Properties[$item[1]].Value | Where-Object { Test-ReportRecordPresent $_ })
+            if ($item[1] -eq 'EventLogs') {
+                $records = @(Get-CriticalRecentEventLogs $Data)
+            }
+            else {
+                $records = @($Data.PSObject.Properties[$item[1]].Value | Where-Object { Test-ReportRecordPresent $_ })
+            }
             if ($records.Count -eq 0) { continue }
             Add-WordHeading $document $item[0] 2
             Add-WordTable $document $records 'No records were returned.'
@@ -1484,7 +1493,7 @@ function Invoke-IloHealthReport {
     param(
         [string]$IloAddress,
         [PSCredential]$Credential,
-        [string]$CustomerName = 'Customer',
+        [string]$CustomerName,
         [string]$OutputPath,
         [int]$TimeoutSec = 30,
         [int]$MaxLogEntries = 100,
@@ -1493,6 +1502,8 @@ function Invoke-IloHealthReport {
 
     if (-not $IloAddress) { $IloAddress = Read-Host 'Enter the iLO 5 IP address or FQDN' }
     if (-not $IloAddress) { throw 'An iLO IP address or FQDN is required.' }
+    if (-not $CustomerName) { $CustomerName = Read-Host 'Enter customer name' }
+    if (-not $CustomerName) { throw 'A customer name is required.' }
     if (-not $Credential) { $Credential = Get-Credential -Message "Credentials for $IloAddress" }
     if (-not $Credential) { throw 'Credentials are required.' }
 

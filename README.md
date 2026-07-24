@@ -19,9 +19,11 @@ The report covers:
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
 The Word output follows a two-part health-assessment format: a branded cover
-page followed by an Executive Overview, fourteen-section Assessment Summary,
-overall health score, and detailed evidence tables. Storage evidence represents
-controllers, physical drives, and logical volumes when iLO advertises them.
+page followed by an Executive Overview with a Recommended Action,
+fourteen-section Assessment Summary, and detailed evidence tables. Storage
+evidence represents controllers, physical drives, and logical volumes when iLO
+advertises them. Administration event-log evidence is limited to entries with
+`Critical` severity from the previous month.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or
@@ -47,8 +49,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 ./HP-iLO5-HealthReport.ps1
 ```
 
-The script prompts for an iLO IP address or FQDN and then displays the standard
-Windows credential prompt. The password is not echoed or saved in the report.
+The script prompts for an iLO IP address or FQDN, customer name, and then
+displays the standard Windows credential prompt. The password is not echoed or
+saved in the report.
 When `-OutputPath` is omitted, the report is saved in the same folder as
 `HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory.
 
@@ -71,7 +74,8 @@ Certificate verification remains enabled by default. Other options:
 
 ```text
 -Credential            PSCredential to use instead of prompting
--CustomerName          Customer name displayed in the cover, header, and overview
+-CustomerName          Customer name displayed in the cover, header, and overview;
+                       prompted when omitted
 -TimeoutSec             Per-request timeout; default 30
 -MaxLogEntries          Maximum entries collected from each log; default 100
 -SkipCertificateCheck   Disable TLS validation for a trusted lab only
