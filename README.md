@@ -49,6 +49,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The script prompts for an iLO IP address or FQDN and then displays the standard
 Windows credential prompt. The password is not echoed or saved in the report.
+When `-OutputPath` is omitted, the report is saved in the same folder as
+`HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory.
 
 Parameters can also be supplied directly:
 

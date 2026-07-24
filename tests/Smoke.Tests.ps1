@@ -276,6 +276,7 @@ $originalNewReport = ${function:New-WordHealthReport}
 $originalRemoveSession = ${function:Remove-IloSession}
 $script:ignoreCertificateErrorsObserved = $false
 $script:customerNameObserved = $null
+$script:outputPathObserved = $null
 function New-IloSession {
     param($BaseUri, $Credential, $TimeoutSec, [bool]$IgnoreCertificateErrors)
     $script:ignoreCertificateErrorsObserved = $IgnoreCertificateErrors
@@ -285,6 +286,7 @@ function Get-IloHealthData { param($Session, $MaxLogEntries); return [PSCustomOb
 function New-WordHealthReport {
     param($Data, $OutputPath, $CustomerName)
     $script:customerNameObserved = $CustomerName
+    $script:outputPathObserved = $OutputPath
     return $OutputPath
 }
 function Remove-IloSession { param($Session) }
@@ -299,6 +301,15 @@ try {
         -SkipCertificateCheck
     Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
     Assert-Equal $script:customerNameObserved 'Example Customer' 'Customer name forwarding failed'
+
+    Invoke-IloHealthReport `
+        -IloAddress '192.0.2.10' `
+        -Credential $credential `
+        -CustomerName 'Example Customer'
+    Assert-Equal (Split-Path -Parent $script:outputPathObserved) (Split-Path -Parent $scriptPath) 'Default report path should use the script directory'
+    if ((Split-Path -Leaf $script:outputPathObserved) -notmatch '^ilo-health-192\.0\.2\.10-\d{8}-\d{6}\.docx$') {
+        throw "Default report filename is incorrect: $script:outputPathObserved"
+    }
 }
 finally {
     Set-Item function:New-IloSession $originalNewSession

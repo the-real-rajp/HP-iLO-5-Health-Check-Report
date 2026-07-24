@@ -1504,7 +1504,7 @@ function Invoke-IloHealthReport {
     if (-not $OutputPath) {
         $safeTarget = ($baseUri.Host -replace '[^A-Za-z0-9.-]', '-')
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $OutputPath = Join-Path 'reports' "ilo-health-$safeTarget-$stamp.docx"
+        $OutputPath = Join-Path $PSScriptRoot "ilo-health-$safeTarget-$stamp.docx"
     }
 
     $session = $null
