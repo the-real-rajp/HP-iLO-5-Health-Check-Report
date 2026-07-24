@@ -490,7 +490,11 @@ try {
         }
         foreach ($expectedText in @(
             'Recommended Action',
+            'Health Check Status/Severity',
+            'Status / Severity',
+            'Guidance',
             'Assessment Summary',
+            'Category',
             'Severity',
             'Information',
             'Server',
@@ -520,6 +524,9 @@ try {
             if ($documentText -notmatch [regex]::Escape($expectedText)) {
                 throw "Native DOCX is missing expected text: $expectedText."
             }
+        }
+        if ($documentText -notmatch '<w:pageBreakBefore/>') {
+            throw 'Information should begin on a new page.'
         }
         foreach ($unexpectedText in @(
             'Overall Health Score',

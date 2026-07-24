@@ -1062,6 +1062,7 @@ function Get-StatusColor {
     if ($text -match '(?i)critical|failed|fatal|risk') { return ConvertTo-WordColor 'D00000' }
     if ($text -match '(?i)warning|degraded|caution|recommended|ignored') { return ConvertTo-WordColor 'E59B00' }
     if ($text -match '(?i)^ok$|^enabled$|^healthy$|^connected$|^registered$') { return ConvertTo-WordColor '008A3B' }
+    if ($text -match '(?i)^info$') { return ConvertTo-WordColor '4F81BD' }
     return ConvertTo-WordColor '555555'
 }
 
@@ -1260,6 +1261,15 @@ function Get-RecommendedActionText {
     return $actions -join ' '
 }
 
+function Get-HealthCheckStatusGuidance {
+    return @(
+        [PSCustomObject][ordered]@{ 'Status / Severity' = 'HEALTHY'; Guidance = 'No recommendations required.' }
+        [PSCustomObject][ordered]@{ 'Status / Severity' = 'WARNING'; Guidance = 'Review the finding and plan remediation during the next appropriate maintenance window.' }
+        [PSCustomObject][ordered]@{ 'Status / Severity' = 'CRITICAL'; Guidance = 'Immediate attention is required. Review and remediate as soon as possible.' }
+        [PSCustomObject][ordered]@{ 'Status / Severity' = 'INFO'; Guidance = 'Informational observation. No immediate remediation is required.' }
+    )
+}
+
 function Get-EndRange {
     param([Parameter(Mandatory)][object]$Document)
     return $Document.Range($Document.Content.End - 1, $Document.Content.End - 1)
@@ -1295,7 +1305,8 @@ function Add-WordHeading {
     param(
         [Parameter(Mandatory)][object]$Document,
         [Parameter(Mandatory)][string]$Text,
-        [ValidateSet(1, 2)][int]$Level = 2
+        [ValidateSet(1, 2)][int]$Level = 2,
+        [switch]$PageBreakBefore
     )
     $range = Get-EndRange $Document
     $range.Text = "$Text`r"
@@ -1308,6 +1319,7 @@ function Add-WordHeading {
     $paragraph.Format.SpaceBefore = if ($Level -eq 1) { 18 } else { 8 }
     $paragraph.Format.SpaceAfter = if ($Level -eq 1) { 6 } else { 3 }
     $paragraph.Format.KeepWithNext = -1
+    if ($PageBreakBefore) { $paragraph.Format.PageBreakBefore = -1 }
     if ($Level -eq 1) {
         $border = $paragraph.Borders.Item($script:WdBorderBottom)
         $border.LineStyle = 1
@@ -1365,7 +1377,7 @@ function Add-WordTable {
             $cell.Range.Text = [string]$value
             $cell.Range.Font.Name = 'Aptos'
             $cell.Range.Font.Size = 9
-            $statusColumns = @('Health', 'Status', 'Severity', 'State', 'Security status', 'SecurityStatus', 'Registration')
+            $statusColumns = @('Health', 'Status', 'Status / Severity', 'Severity', 'State', 'Security status', 'SecurityStatus', 'Registration')
             $cell.Range.Font.Bold = if ($name -in $statusColumns) { -1 } else { 0 }
             $cell.Range.Font.Color = if ($name -in $statusColumns) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
             if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe }
@@ -1398,7 +1410,7 @@ function Add-AssessmentSummaryTable {
     for ($column = 1; $column -le 4; $column++) {
         $table.Columns.Item($column).Width = $widths[$column - 1]
         $header = $table.Cell(1, $column)
-        $header.Range.Text = if ($column % 2 -eq 1) { 'Section' } else { 'Severity' }
+        $header.Range.Text = if ($column % 2 -eq 1) { 'Category' } else { 'Severity' }
         $header.Range.Font.Name = 'Aptos'
         $header.Range.Font.Size = 9
         $header.Range.Font.Bold = -1
@@ -1564,7 +1576,8 @@ function New-OpenXmlParagraph {
         [string]$Color = '222222',
         [double]$Size = 10,
         [switch]$KeepNext,
-        [switch]$PageBreakAfter
+        [switch]$PageBreakAfter,
+        [switch]$PageBreakBefore
     )
 
     $paragraphProperties = @(
@@ -1573,6 +1586,7 @@ function New-OpenXmlParagraph {
         '<w:spacing w:before="' + $Before + '" w:after="' + $After + '" w:line="276" w:lineRule="auto"/>'
     )
     if ($KeepNext) { $paragraphProperties += '<w:keepNext/>' }
+    if ($PageBreakBefore) { $paragraphProperties += '<w:pageBreakBefore/>' }
     $xml = '<w:p><w:pPr>' + ($paragraphProperties -join '') + '</w:pPr>' +
         (New-OpenXmlRun -Text $Text -Size $Size -Color $Color -Bold:$Bold -Italic:$Italic)
     if ($PageBreakAfter) { $xml += '<w:r><w:br w:type="page"/></w:r>' }
@@ -1586,6 +1600,7 @@ function Get-OpenXmlStatusColor {
         '^(CRITICAL|Critical|Failed|Fatal|Risk)$' { return 'C00000' }
         '^(RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
         '^(HEALTHY|OK|Ok|Enabled|Connected)$' { return '00843D' }
+        '^(INFO|Info)$' { return '4F81BD' }
         default { return '666666' }
     }
 }
@@ -1675,7 +1690,6 @@ function New-OpenXmlTable {
 
     return @"
 <w:tbl><w:tblPr><w:tblW w:w="10800" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="80" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="4" w:color="C8D5DF"/><w:left w:val="single" w:sz="4" w:color="C8D5DF"/><w:bottom w:val="single" w:sz="4" w:color="C8D5DF"/><w:right w:val="single" w:sz="4" w:color="C8D5DF"/><w:insideH w:val="single" w:sz="4" w:color="DCE5EB"/><w:insideV w:val="single" w:sz="4" w:color="DCE5EB"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
-$(New-OpenXmlParagraph -Text '' -After 80 -Size 2)
 "@
 }
 
@@ -1749,6 +1763,7 @@ function New-OpenXmlHealthReport {
     $displayTarget = ([uri]$Data.Target).Host
     $assessment = @(New-AssessmentSummary $Data)
     $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
+    $healthCheckStatusGuidance = @(Get-HealthCheckStatusGuidance)
     $body = [Collections.Generic.List[string]]::new()
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'HP iLO Health Check' -Style 'Title' -Alignment center -Before 2300 -After 180 -Bold -Color '005F9E' -Size 28))
@@ -1759,6 +1774,8 @@ function New-OpenXmlHealthReport {
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Executive Overview' -Style 'Heading1' -Before 0 -After 160 -Bold -Color '005F9E' -Size 16 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." -After 160 -Size 10.5))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Health Check Status/Severity' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    [void]$body.Add((New-OpenXmlTable -Rows $healthCheckStatusGuidance -Columns @('Status / Severity', 'Guidance') -Widths @(3000, 7800) -StatusColumns))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
@@ -1769,15 +1786,15 @@ function New-OpenXmlHealthReport {
         $left = if ($leftIndex -lt $assessment.Count) { $assessment[$leftIndex] } else { $null }
         $right = if ($rightIndex -lt $assessment.Count) { $assessment[$rightIndex] } else { $null }
         [PSCustomObject][ordered]@{
-            Assessment = if ($null -ne $left) { $left.Section } else { '' }
+            Category = if ($null -ne $left) { $left.Section } else { '' }
             Severity = if ($null -ne $left) { $left.Status } else { '' }
-            'Assessment ' = if ($null -ne $right) { $right.Section } else { '' }
+            'Category ' = if ($null -ne $right) { $right.Section } else { '' }
             'Severity ' = if ($null -ne $right) { $right.Status } else { '' }
         }
     }
-    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Severity', 'Assessment ', 'Severity ') -Widths @(3460, 1940, 3460, 1940) -StatusColumns))
+    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Category', 'Severity', 'Category ', 'Severity ') -Widths @(3460, 1940, 3460, 1940) -StatusColumns))
 
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext -PageBreakBefore))
     foreach ($item in @(
         @('Server', 'ServerStatus', $true),
         @('iLO', 'IloInformation', $false),
@@ -1991,12 +2008,15 @@ function New-WordHealthReport {
 
         $assessment = @(New-AssessmentSummary $Data)
         $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
+        $healthCheckStatusGuidance = @(Get-HealthCheckStatusGuidance)
+        Add-WordHeading $document 'Health Check Status/Severity' 2
+        Add-WordTable $document $healthCheckStatusGuidance 'No status guidance is available.'
         Add-WordHeading $document 'Recommended Action' 2
         Add-WordParagraph $document $recommendedAction 11 $false '222222' 6
         Add-WordHeading $document 'Assessment Summary' 2
         Add-AssessmentSummaryTable $document $assessment
 
-        Add-WordHeading $document 'Information' 1
+        Add-WordHeading $document 'Information' 1 -PageBreakBefore
         foreach ($item in @(
             @('Server', 'ServerStatus', $true),
             @('iLO', 'IloInformation', $false),

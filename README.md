@@ -23,30 +23,40 @@ The report covers:
   column.
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
-The Word output follows a two-part health-assessment format: a branded cover
-page followed by an Executive Overview with a Recommended Action,
-evidence-based Assessment Summary, and grouped detailed evidence tables. Sections
-with only `Unknown` or unavailable status data are not displayed or counted.
-Reports use narrow margins, the Winslow Tech Group logo in the upper-left
-header, the report identifier in the upper-right header, and a footer with
-`Confidential` on the left, the Winslow Tech Group copyright notice centered,
-and page numbering on the right. If the local logo file is unavailable, the
-script downloads it automatically from winslowtg.com.
-The former Lifecycle Management, Management, and Administration summary rows
-are not included. Storage evidence represents controllers, physical drives, and
-logical volumes when iLO advertises them. Event-log evidence is limited to
-entries with `Critical` severity from the previous month and contributes to
-recommended-action logic. A Dedicated Network Port that is not configured for
-iLO is marked `IGNORED`; an unconfigured Shared Network Port is omitted. Remote Support
-is `HEALTHY` when registered, `RECOMMENDED` when explicitly unregistered or
-reporting a transmission error, and omitted when its registration is unknown.
-An `Ignored` Overall Security Status is treated as healthy, and individual
-Security Dashboard findings with `Ignore = True` remain excluded from negative
-assessment without displaying a separate Ignored column.
-HPE Compute Ops Management uses iLO's HPE `CloudConnect` status. The report
-does not include the GreenLake activation key. Compute Ops Management is
-optional: `NotEnabled` remains visible in the Information details but does not
-make the Information assessment `RECOMMENDED`.
+## Report layout
+
+- A branded cover page is followed by an Executive Overview, Recommended
+  Action, Assessment Summary, and grouped evidence tables.
+- A Health Check Status/Severity guide appears above Recommended Action.
+- Sections with only `Unknown` or unavailable status data are not shown or
+  counted.
+- Narrow margins are used throughout.
+- The Winslow Tech Group logo appears in the upper-left header, and the report
+  identifier appears in the upper-right header.
+- The footer has `Confidential` on the left, the Winslow Tech Group copyright
+  notice in the center, and page numbering on the right.
+- If the local logo file is missing, the script downloads it from
+  winslowtg.com automatically.
+
+## Assessment behavior
+
+- Lifecycle Management, Management, and Administration summary rows are not
+  included.
+- Storage evidence includes advertised controllers, physical drives, and
+  logical volumes.
+- Only `Critical` event-log entries from the previous month contribute to the
+  recommended-action logic.
+- An unconfigured Dedicated Network Port is `IGNORED`; an unconfigured Shared
+  Network Port is omitted.
+- Remote Support is `HEALTHY` when registered, `RECOMMENDED` when explicitly
+  unregistered or reporting a transmission error, and omitted when its
+  registration is unknown.
+- An `Ignored` Overall Security Status is treated as healthy. Individual
+  Security Dashboard findings with `Ignore = True` do not lower the assessment
+  and do not add a separate Ignored column.
+- HPE Compute Ops Management uses iLO's HPE `CloudConnect` status and never
+  exposes the GreenLake activation key. It is optional: `NotEnabled` remains
+  visible in Information but does not make that assessment `RECOMMENDED`.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or
