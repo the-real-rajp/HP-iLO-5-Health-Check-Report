@@ -373,7 +373,6 @@ function Convert-IloInformation {
         'Firmware version' = Get-ObjectProperty $Manager 'FirmwareVersion' 'Unknown'
         'Date and time' = Get-ObjectProperty $Manager 'DateTime' 'Unknown'
         'Health' = Get-HealthValue $Manager
-        'State' = Get-StateValue $Manager
     }
 }
 
@@ -388,7 +387,6 @@ function Convert-ComputeOpsManagement {
         'Supported' = if ($null -eq $cloudConnect) { 'Not advertised' } else { 'Yes' }
         'Connection status' = Get-ObjectProperty $cloudConnect 'CloudConnectStatus' 'Unknown'
         'Workspace ID' = Get-ObjectProperty $cloudConnect 'WorkspaceId' 'Not reported'
-        'Failure reason' = Get-ObjectProperty $cloudConnect 'FailReason' 'None'
         'Next retry time' = Get-ObjectProperty $cloudConnect 'NextRetryTime' 'N/A'
     }
 }
@@ -468,7 +466,6 @@ function Convert-Temperature {
         'Reading (C)' = Get-ObjectProperty $Item 'ReadingCelsius' 'N/A'
         'Upper critical (C)' = Get-ObjectProperty $Item 'UpperThresholdCritical' 'N/A'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
@@ -479,7 +476,6 @@ function Convert-Fan {
         'Reading' = Get-ObjectProperty $Item 'Reading' 'N/A'
         'Units' = Get-ObjectProperty $Item 'ReadingUnits' 'N/A'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
@@ -491,7 +487,6 @@ function Convert-PowerSupply {
         'Serial number' = Get-ObjectProperty $Item 'SerialNumber' 'Unknown'
         'Capacity (W)' = Get-ObjectProperty $Item 'PowerCapacityWatts' 'N/A'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
@@ -503,7 +498,6 @@ function Convert-Memory {
         'Type' = Get-ObjectProperty $Item 'MemoryDeviceType' 'Unknown'
         'Speed (MHz)' = Get-ObjectProperty $Item 'OperatingSpeedMhz' 'N/A'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
@@ -512,14 +506,15 @@ function Test-ReportRecordPresent {
 
     if ($null -eq $Record) { return $false }
     $state = Get-ObjectProperty -InputObject $Record -Name 'State' -Default ''
-    return ([string]$state -notmatch '(?i)^absent$')
+    $status = Get-ObjectProperty -InputObject $Record -Name 'Status' -Default ''
+    return ([string]$state -notmatch '(?i)^absent$' -and [string]$status -notmatch '(?i)^absent$')
 }
 
 function Test-UnknownReportValue {
     param([AllowNull()][object]$Value)
 
     if ($null -eq $Value) { return $true }
-    return ([string]$Value).Trim() -match '(?i)^(unknown)?$'
+    return ([string]$Value).Trim() -match '(?i)^(unknown|absent)?$'
 }
 
 function Get-ReportRecords {
@@ -587,17 +582,17 @@ function Convert-Processor {
         'Speed (MHz)' = Get-ObjectProperty $Item 'OperatingSpeedMHz' (Get-ObjectProperty $Item 'MaxSpeedMHz' 'Unknown')
         'Instruction set' = Get-ObjectProperty $Item 'InstructionSet' 'Unknown'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
 function Convert-Firmware {
     param([Parameter(Mandatory)][object]$Item)
+    $health = Get-HealthValue $Item
+    if ($health -match '(?i)^unknown$') { $health = 'OK' }
     [PSCustomObject][ordered]@{
         'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Unknown')
         'Version' = Get-ObjectProperty $Item 'Version' 'Unknown'
-        'Updateable' = Get-ObjectProperty $Item 'Updateable' 'Unknown'
-        'Health' = Get-HealthValue $Item
+        'Health' = $health
     }
 }
 
@@ -625,7 +620,6 @@ function Convert-SecurityDashboardOverview {
         'Name' = 'Overall Security Status'
         'Security status' = Get-ObjectProperty $Dashboard 'OverallSecurityStatus' 'Unknown'
         'Current value' = "Server configuration lock: $(Get-ObjectProperty $Dashboard 'ServerConfigurationLockStatus' 'Unknown')"
-        'Ignored' = $false
     }
 }
 
@@ -637,7 +631,6 @@ function Convert-SecurityParameter {
         'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Security parameter')
         'Security status' = if ($ignored) { 'Ignored' } else { Get-ObjectProperty $Item 'SecurityStatus' 'Unknown' }
         'Current value' = Get-ObjectProperty $Item 'State' 'Unknown'
-        'Ignored' = $ignored
     }
 }
 
@@ -869,7 +862,6 @@ function Get-IloHealthData {
             'Name' = Get-ObjectProperty $item 'Name' (Get-ObjectProperty $item 'Id' 'Unknown')
             'Description' = Get-ObjectProperty $item 'Description' ''
             'Health' = Get-HealthValue $item
-            'State' = Get-StateValue $item
         })
         foreach ($relation in @('Drives', 'Volumes')) {
             $label = if ($relation -eq 'Drives') { 'Drive' } else { 'Volume' }
@@ -892,7 +884,6 @@ function Get-IloHealthData {
                     'Name' = "$label`: $(Get-ObjectProperty $child 'Name' (Get-ObjectProperty $child 'Id' 'Unknown'))"
                     'Description' = Get-ObjectProperty $child 'Model' (Get-ObjectProperty $child 'VolumeType' '')
                     'Health' = Get-HealthValue $child
-                    'State' = Get-StateValue $child
                 })
             }
         }
@@ -1024,7 +1015,7 @@ function Get-AssessmentStatus {
             else {
                 Get-ObjectProperty -InputObject $item -Name $name
             }
-            if ($null -ne $value -and [string]$value -notmatch '(?i)^\s*(unknown)?\s*$') {
+            if ($null -ne $value -and [string]$value -notmatch '(?i)^\s*(unknown|absent)?\s*$') {
                 if ($ignored -and $name -match '(?i)security' -and [string]$value -match '(?i)^risk$') {
                     $signals.Add('Ignored')
                 }
@@ -1090,13 +1081,19 @@ function Get-SecurityAssessmentStatus {
 }
 
 function Get-IloNetworkPortAssessmentStatus {
-    param([AllowEmptyCollection()][object[]]$Rows)
+    param(
+        [AllowEmptyCollection()][object[]]$Rows,
+        [switch]$OmitWhenUnconfigured
+    )
 
     if (@($Rows).Count -eq 0) { return $null }
     $configuredRow = @($Rows | Where-Object Setting -eq 'Configured for iLO' | Select-Object -First 1)
     if ($configuredRow.Count -eq 0) { return $null }
     $configured = [string]$configuredRow[0].Value
-    if ($configured -match '(?i)^false$') { return 'IGNORED' }
+    if ($configured -match '(?i)^false$') {
+        if ($OmitWhenUnconfigured) { return $null }
+        return 'IGNORED'
+    }
     if ($configured -notmatch '(?i)^true$') { return $null }
 
     $healthRow = @($Rows | Where-Object Setting -eq 'Health' | Select-Object -First 1)
@@ -1152,7 +1149,7 @@ function New-AssessmentSummary {
         [PSCustomObject]@{ Section = 'Power & Thermal'; Status = Get-AssessmentStatus $powerThermal }
         [PSCustomObject]@{ Section = 'Performance'; Status = Get-AssessmentStatus $performance }
         [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloDedicatedNetworkPort' @())) }
-        [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloSharedNetworkPort' @())) }
+        [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloSharedNetworkPort' @())) -OmitWhenUnconfigured }
         [PSCustomObject]@{ Section = 'Remote Support'; Status = Get-RemoteSupportAssessmentStatus @((Get-ObjectProperty $Data 'RemoteSupportRegistration' @())) }
         [PSCustomObject]@{ Section = 'Security Dashboard'; Status = if ($securityEvents.Count -gt 0) { Get-AssessmentStatus $securityEvidence } else { Get-SecurityAssessmentStatus $securityDashboard } }
     )
@@ -1325,7 +1322,7 @@ function Add-AssessmentSummaryTable {
     for ($column = 1; $column -le 4; $column++) {
         $table.Columns.Item($column).Width = $widths[$column - 1]
         $header = $table.Cell(1, $column)
-        $header.Range.Text = if ($column % 2 -eq 1) { 'Section' } else { 'Status' }
+        $header.Range.Text = if ($column % 2 -eq 1) { 'Section' } else { 'Severity' }
         $header.Range.Font.Name = 'Aptos'
         $header.Range.Font.Size = 9
         $header.Range.Font.Bold = -1
@@ -1654,12 +1651,12 @@ function New-OpenXmlHealthReport {
         $right = if ($rightIndex -lt $assessment.Count) { $assessment[$rightIndex] } else { $null }
         [PSCustomObject][ordered]@{
             Assessment = if ($null -ne $left) { $left.Section } else { '' }
-            Status = if ($null -ne $left) { $left.Status } else { '' }
+            Severity = if ($null -ne $left) { $left.Status } else { '' }
             'Assessment ' = if ($null -ne $right) { $right.Section } else { '' }
-            'Status ' = if ($null -ne $right) { $right.Status } else { '' }
+            'Severity ' = if ($null -ne $right) { $right.Status } else { '' }
         }
     }
-    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Status', 'Assessment ', 'Status ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
+    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Severity', 'Assessment ', 'Severity ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
     foreach ($item in @(
@@ -1734,13 +1731,6 @@ function New-OpenXmlHealthReport {
             if ($records.Count -eq 0) { continue }
             [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
             [void]$body.Add((New-OpenXmlTable -Rows $records -StatusColumns))
-        }
-    }
-
-    if (@($Data.CollectionNotes).Count -gt 0) {
-        [void]$body.Add((New-OpenXmlParagraph -Text 'Collection Notes' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-        foreach ($note in $Data.CollectionNotes) {
-            [void]$body.Add((New-OpenXmlBulletParagraph -Text $note))
         }
     }
 
@@ -1947,13 +1937,6 @@ function New-WordHealthReport {
                 if ($records.Count -eq 0) { continue }
                 Add-WordHeading $document $item[0] 2
                 Add-WordTable $document $records 'No records were returned.'
-            }
-        }
-
-        if (@($Data.CollectionNotes).Count -gt 0) {
-            Add-WordHeading $document 'Collection Notes' 2
-            foreach ($note in $Data.CollectionNotes) {
-                Add-WordParagraph $document "- $note" 9.5 $false '666666' 4
             }
         }
 

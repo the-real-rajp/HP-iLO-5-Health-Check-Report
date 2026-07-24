@@ -64,6 +64,9 @@ Assert-Equal $securityParameter.'Security status' 'Risk' 'Security Dashboard sta
 if ($securityParameter.PSObject.Properties.Name -contains 'Recommended action') {
     throw 'Security Dashboard output should not contain Recommended action.'
 }
+if ($securityParameter.PSObject.Properties.Name -contains 'Ignored') {
+    throw 'Security Dashboard output should not contain an Ignored column.'
+}
 Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'CRITICAL' 'An unignored Security Dashboard risk must be critical'
 $ignoredSecurityParameter = Convert-SecurityParameter ([PSCustomObject]@{
     Name = 'Ignored security setting'
@@ -87,6 +90,10 @@ $firmwareRecord = Convert-Firmware ([PSCustomObject]@{
 if ($firmwareRecord.PSObject.Properties.Name -contains 'State') {
     throw 'Firmware report output should not contain State.'
 }
+if ($firmwareRecord.PSObject.Properties.Name -contains 'Updateable') {
+    throw 'Firmware report output should not contain Updateable.'
+}
+Assert-Equal $firmwareRecord.Health 'OK' 'Firmware without an advertised health value should display OK'
 
 $sharedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
     Name = 'Manager Shared Network Interface'
@@ -120,6 +127,7 @@ $dedicatedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
     Oem = [PSCustomObject]@{ Hpe = [PSCustomObject]@{ InterfaceType = 'Dedicated' } }
 })
 Assert-Equal (Get-IloNetworkPortAssessmentStatus $dedicatedInterface.Rows) 'IGNORED' 'Unconfigured dedicated iLO NIC should be ignored'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $dedicatedInterface.Rows -OmitWhenUnconfigured) $null 'An unconfigured shared iLO NIC should be omitted'
 Assert-Equal (@($dedicatedInterface.Rows | Where-Object Setting -eq 'Assessment note')[0].Value) 'iLO is not configured to use this NIC.' 'Dedicated NIC ignore note is missing'
 
 $server = Convert-ServerStatus ([PSCustomObject]@{
@@ -140,6 +148,9 @@ $iloInformation = Convert-IloInformation ([PSCustomObject]@{
 })
 Assert-Equal $iloInformation.'Firmware version' '3.10' 'iLO firmware conversion failed'
 Assert-Equal $iloInformation.Health 'OK' 'iLO health conversion failed'
+if ($iloInformation.PSObject.Properties.Name -contains 'State') {
+    throw 'iLO report output should not contain State.'
+}
 
 $computeOps = Convert-ComputeOpsManagement ([PSCustomObject]@{
     Name = 'iLO 5'
@@ -156,6 +167,9 @@ $computeOps = Convert-ComputeOpsManagement ([PSCustomObject]@{
 })
 Assert-Equal $computeOps.'Connection status' 'Connected' 'Compute Ops Management status conversion failed'
 Assert-Equal $computeOps.'Workspace ID' 'workspace-123' 'Compute Ops Management workspace conversion failed'
+if ($computeOps.PSObject.Properties.Name -contains 'Failure reason') {
+    throw 'Compute Ops Management output should not contain Failure reason.'
+}
 Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ 'Connection status' = 'ConnectionFailed' })) 'CRITICAL' 'Failed Compute Ops connection should be critical'
 if ($computeOps.PSObject.Properties.Name -contains 'Activation key' -or
     (($computeOps.PSObject.Properties.Value | ForEach-Object { [string]$_ }) -join ' ') -match 'must-not-be-reported') {
@@ -184,6 +198,23 @@ $deviceRecord = Convert-DeviceInventory ([PSCustomObject]@{
 Assert-Equal $deviceRecord.Location 'Embedded RAID' 'Device inventory location conversion failed'
 Assert-Equal $deviceRecord.'Firmware version' '6.52' 'Device inventory firmware conversion failed'
 Assert-Equal $deviceRecord.Status 'Enabled' 'Device inventory status conversion failed'
+$absentDeviceData = [PSCustomObject]@{
+    DeviceInventory = @([PSCustomObject]@{ Location = 'Empty slot'; Status = 'Absent' })
+}
+Assert-Equal @(Get-ReportRecords -Data $absentDeviceData -PropertyName 'DeviceInventory').Count 0 'Absent device inventory records should be omitted'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Status = 'Absent' })) $null 'Absent device inventory records should not be assessed'
+
+foreach ($convertedRecord in @(
+    $temperature,
+    (Convert-Fan ([PSCustomObject]@{ Name = 'Fan 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-PowerSupply ([PSCustomObject]@{ Name = 'Power Supply 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-Memory ([PSCustomObject]@{ Name = 'DIMM 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } })),
+    (Convert-Processor ([PSCustomObject]@{ Name = 'CPU 1'; Status = [PSCustomObject]@{ Health = 'OK'; State = 'Enabled' } }))
+)) {
+    if ($convertedRecord.PSObject.Properties.Name -contains 'State') {
+        throw 'Hardware detail output should not contain State.'
+    }
+}
 
 $remoteSupport = Convert-RemoteSupportRegistration ([PSCustomObject]@{
     RemoteSupportEnabled = $true
@@ -277,7 +308,6 @@ $nativeReportData = [PSCustomObject]@{
         'Manager type' = 'BMC'
         'Firmware version' = '3.10'
         Health = 'OK'
-        State = 'Enabled'
     })
     StatusInformation = @([PSCustomObject][ordered]@{
         Component = 'Server'
@@ -290,7 +320,6 @@ $nativeReportData = [PSCustomObject]@{
         Supported = 'Yes'
         'Connection status' = 'Connected'
         'Workspace ID' = 'workspace-123'
-        'Failure reason' = 'None'
         'Next retry time' = 'N/A'
     })
     Temperatures = @([PSCustomObject][ordered]@{
@@ -298,38 +327,32 @@ $nativeReportData = [PSCustomObject]@{
         'Reading (C)' = 22
         'Upper critical (C)' = 42
         Health = 'OK'
-        State = 'Enabled'
     })
     Fans = @([PSCustomObject][ordered]@{
         Name = 'Fan 1'
         'Reading (%)' = 23
         Health = 'OK'
-        State = 'Enabled'
     })
     PowerSupplies = @([PSCustomObject][ordered]@{
         Name = 'Power Supply 1'
         Model = 'Example PSU'
         Health = 'OK'
-        State = 'Enabled'
     })
     Storage = @([PSCustomObject][ordered]@{
         Type = 'Drive'
         Name = 'Disk 1'
         Capacity = '1.8 TB'
         Health = 'OK'
-        State = 'Enabled'
     })
     Memory = @([PSCustomObject][ordered]@{
         Name = 'DIMM 1'
         Capacity = '32 GB'
         Health = 'OK'
-        State = 'Enabled'
     })
     Processors = @([PSCustomObject][ordered]@{
         Name = 'CPU 1'
         Model = 'Example Processor'
         Health = 'OK'
-        State = 'Enabled'
     })
     SystemNetwork = @([PSCustomObject][ordered]@{
         Name = 'Embedded LOM 1'
@@ -350,7 +373,7 @@ $nativeReportData = [PSCustomObject]@{
     Firmware = @([PSCustomObject][ordered]@{
         Name = 'iLO 5'
         Version = '3.10'
-        Updateable = $true
+        Health = 'OK'
     })
     IloDedicatedNetworkPort = $dedicatedInterface.Rows
     IloSharedNetworkPort = $sharedInterface.Rows
@@ -368,7 +391,6 @@ $nativeReportData = [PSCustomObject]@{
     SecurityDashboard = @([PSCustomObject][ordered]@{
         Name = 'Security State'
         'Security status' = 'Ok'
-        Ignored = $false
     })
     EventLogs = @(
         [PSCustomObject][ordered]@{
@@ -425,6 +447,7 @@ try {
         foreach ($expectedText in @(
             'Recommended Action',
             'Assessment Summary',
+            'Severity',
             'Information',
             'Server',
             'iLO',
@@ -460,6 +483,9 @@ try {
             'Lifecycle Management',
             '>Administration<',
             '>Management<',
+            'Collection Notes',
+            'Failure reason',
+            'Updateable',
             'Unknown',
             'Recent critical event for report validation.',
             'Recent warning event that must be omitted.',

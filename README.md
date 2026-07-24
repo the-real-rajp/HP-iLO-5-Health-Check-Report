@@ -15,8 +15,8 @@ The report covers:
 - Firmware & OS Software
 - Power & Thermal: power supplies, fans, and temperatures
 - Integrated Management Log, iLO Event Log, and other advertised log services
-- empty detail sections, `Unknown` fields, and hardware records reported as
-  `Absent` are omitted
+- empty detail sections, `Unknown` or `Absent` fields, and hardware records
+  reported as `Absent` are omitted
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
 The Word output follows a two-part health-assessment format: a branded cover
@@ -27,12 +27,13 @@ The former Lifecycle Management, Management, and Administration summary rows
 are not included. Storage evidence represents controllers, physical drives, and
 logical volumes when iLO advertises them. Event-log evidence is limited to
 entries with `Critical` severity from the previous month and contributes to
-recommended-action logic. A Dedicated or Shared Network Port that is not
-configured for iLO is marked `IGNORED` in the Assessment Summary. Remote Support
+recommended-action logic. A Dedicated Network Port that is not configured for
+iLO is marked `IGNORED`; an unconfigured Shared Network Port is omitted. Remote Support
 is `HEALTHY` when registered, `RECOMMENDED` when explicitly unregistered or
 reporting a transmission error, and omitted when its registration is unknown.
 An `Ignored` Overall Security Status is treated as healthy, and individual
-Security Dashboard findings with `Ignored = True` display `Ignored`.
+Security Dashboard findings with `Ignore = True` remain excluded from negative
+assessment without displaying a separate Ignored column.
 HPE Compute Ops Management uses iLO's HPE `CloudConnect` status. The report
 does not include the GreenLake activation key.
 
