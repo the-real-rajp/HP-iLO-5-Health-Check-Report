@@ -203,6 +203,31 @@ Assert-Equal $deviceRecord.'Firmware version' '6.52' 'Device inventory firmware 
 Assert-Equal $deviceRecord.Status 'OK' 'Device inventory status conversion failed'
 $percentFan = Convert-Fan ([PSCustomObject]@{ Name = 'Fan 2'; Reading = 23; ReadingUnits = 'Percent'; Status = [PSCustomObject]@{ Health = 'OK' } })
 Assert-Equal $percentFan.Reading '23%' 'Percent fan reading should include the percent symbol'
+if ($percentFan.PSObject.Properties.Name -contains 'Units') {
+    throw 'Fan report output should not contain Units.'
+}
+$notApplicableRowData = [PSCustomObject]@{
+    Memory = @(
+        [PSCustomObject][ordered]@{ Name = 'DIMM 1'; 'Capacity (MiB)' = 16384; Type = 'DDR4'; 'Speed (MHz)' = 2400; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'DIMM 2'; 'Capacity (MiB)' = 0; Type = 'N/A'; 'Speed (MHz)' = 'N/A'; Health = 'OK' }
+    )
+    SystemNetwork = @(
+        [PSCustomObject][ordered]@{ Name = 'vmnic0'; 'IP address' = '192.0.2.30'; Link = 'N/A'; 'Speed (Mbps)' = 'N/A'; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'vmnic1'; 'IP address' = 'N/A'; Link = 'N/A'; 'Speed (Mbps)' = 'N/A'; Health = 'OK' }
+    )
+    Temperatures = @(
+        [PSCustomObject][ordered]@{ Name = 'Ambient'; 'Reading (C)' = 22; 'Upper critical (C)' = 42; Health = 'OK' },
+        [PSCustomObject][ordered]@{ Name = 'Unused sensor'; 'Reading (C)' = 0; 'Upper critical (C)' = 'N/A'; Health = 'OK' }
+    )
+}
+$memoryRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'Memory' -OmitNAValues -OmitRecordsWithNA)
+Assert-Equal $memoryRows.Count 1 'Memory rows containing N/A should be omitted'
+Assert-Equal $memoryRows[0].Name 'DIMM 1' 'The populated memory row should be retained'
+$networkRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'SystemNetwork' -OmitNAValues -OmitRecordsWithNA -KeepRecordsWithValuesIn @('IP address'))
+Assert-Equal $networkRows.Count 1 'Network rows without an IP address should be omitted when they contain N/A'
+Assert-Equal $networkRows[0].'IP address' '192.0.2.30' 'A network row with an IP address should be retained'
+$temperatureRows = @(Get-ReportRecords -Data $notApplicableRowData -PropertyName 'Temperatures' -OmitNAValues -OmitRecordsWithNA)
+Assert-Equal $temperatureRows.Count 1 'Temperature rows containing N/A should be omitted'
 $absentDeviceData = [PSCustomObject]@{
     DeviceInventory = @([PSCustomObject]@{ Location = 'Empty slot'; Status = 'Absent' })
 }
@@ -449,6 +474,19 @@ try {
         $reader = New-Object IO.StreamReader($documentEntry.Open())
         try { $documentText = $reader.ReadToEnd() }
         finally { $reader.Dispose() }
+        $footerEntry = $zip.GetEntry('word/footer1.xml')
+        $reader = New-Object IO.StreamReader($footerEntry.Open())
+        try { $footerText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        foreach ($expectedFooterText in @(
+            'Confidential',
+            "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved",
+            '<w:tab w:val="center" w:pos="5400"/>'
+        )) {
+            if ($footerText -notmatch [regex]::Escape($expectedFooterText)) {
+                throw "Native DOCX footer is missing expected text: $expectedFooterText."
+            }
+        }
         foreach ($expectedText in @(
             'Recommended Action',
             'Assessment Summary',

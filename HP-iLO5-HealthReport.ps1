@@ -484,7 +484,6 @@ function Convert-Fan {
     [PSCustomObject][ordered]@{
         'Name' = Get-ObjectProperty $Item 'Name' 'Unknown'
         'Reading' = $reading
-        'Units' = $units
         'Health' = Get-HealthValue $Item
     }
 }
@@ -566,11 +565,13 @@ function Test-NotApplicableReportValue {
 
 function Get-ReportRecords {
     param(
-    [Parameter(Mandatory)][object]$Data,
-    [Parameter(Mandatory)][string]$PropertyName,
+        [Parameter(Mandatory)][object]$Data,
+        [Parameter(Mandatory)][string]$PropertyName,
         [switch]$PropertyMap,
         [string[]]$ExcludeColumns = @(),
-        [switch]$OmitNAValues
+        [switch]$OmitNAValues,
+        [switch]$OmitRecordsWithNA,
+        [string[]]$KeepRecordsWithValuesIn = @()
     )
 
     $property = $Data.PSObject.Properties[$PropertyName]
@@ -583,6 +584,20 @@ function Get-ReportRecords {
         })
     }
     $records = @($property.Value | Where-Object { Test-ReportRecordPresent $_ })
+    if ($OmitRecordsWithNA) {
+        $records = @($records | Where-Object {
+            $record = $_
+            $hasNotApplicableValue = @($record.PSObject.Properties | Where-Object {
+                Test-NotApplicableReportValue $_.Value
+            }).Count -gt 0
+            if (-not $hasNotApplicableValue) { return $true }
+
+            @($KeepRecordsWithValuesIn | Where-Object {
+                $value = Get-ObjectProperty $record $_
+                -not (Test-UnknownReportValue $value) -and -not (Test-NotApplicableReportValue $value)
+            }).Count -gt 0
+        })
+    }
     if ($records.Count -eq 0) { return @() }
 
     $columns = [Collections.Generic.List[string]]::new()
@@ -1454,11 +1469,15 @@ function Set-WordReportFurniture {
     foreach ($footerIndex in 1..3) {
         $Section.Footers.Item($footerIndex).LinkToPrevious = $false
         $footer = $Section.Footers.Item($footerIndex).Range
-        $footer.Text = "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved`tPage "
+        $footer.Text = "Confidential`t$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved`tPage "
         $footer.Font.Name = 'Aptos'
         $footer.Font.Size = 9
         $footer.Font.Color = ConvertTo-WordColor $script:ReportDark
+        $footer.ParagraphFormat.TabStops.Add(270, 2, 0) | Out-Null
         $footer.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
+        $confidentialRange = $footer.Duplicate
+        $confidentialRange.SetRange($footer.Start, $footer.Start + 'Confidential'.Length)
+        $confidentialRange.Font.Italic = -1
         $pageRange = $footer.Duplicate
         $pageRange.SetRange($pageRange.End - 1, $pageRange.End - 1)
         $pageRange.Fields.Add($pageRange, $script:WdFieldPage) | Out-Null
@@ -1784,7 +1803,15 @@ function New-OpenXmlHealthReport {
         @('Storage', 'Storage', $false)
     )
     $systemSectionRecords = @($systemSections | ForEach-Object {
-        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -PropertyMap:([bool]$_[2]) -OmitNAValues:($_[0] -in @('Memory', 'Network'))), [bool]$_[2])
+        $recordArguments = @{
+            Data = $Data
+            PropertyName = $_[1]
+            PropertyMap = [bool]$_[2]
+            OmitNAValues = $_[0] -in @('Memory', 'Network')
+            OmitRecordsWithNA = $_[0] -in @('Memory', 'Network')
+        }
+        if ($_[0] -eq 'Network') { $recordArguments.KeepRecordsWithValuesIn = @('IP address') }
+        ,@($_[0], @(Get-ReportRecords @recordArguments), [bool]$_[2])
     })
     if (@($systemSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
         [void]$body.Add((New-OpenXmlParagraph -Text 'System Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
@@ -1810,7 +1837,7 @@ function New-OpenXmlHealthReport {
         @('Temperatures', 'Temperatures')
     )
     $powerSectionRecords = @($powerSections | ForEach-Object {
-        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -OmitNAValues:($_[0] -eq 'Temperatures')))
+        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -OmitNAValues:($_[0] -eq 'Temperatures') -OmitRecordsWithNA:($_[0] -eq 'Temperatures')))
     })
     if (@($powerSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
         [void]$body.Add((New-OpenXmlParagraph -Text 'Power & Thermal' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
@@ -1840,7 +1867,7 @@ function New-OpenXmlHealthReport {
 "@
     $footerXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="10800"/></w:tabs><w:pBdr><w:top w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:before="80"/></w:pPr>$(New-OpenXmlRun -Text "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved" -Size 8.5 -Color '506675')<w:r><w:tab/></w:r>$(New-OpenXmlRun -Text 'Page ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>$(New-OpenXmlRun -Text ' of ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="NUMPAGES"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="5400"/><w:tab w:val="right" w:pos="10800"/></w:tabs><w:pBdr><w:top w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:before="80"/></w:pPr>$(New-OpenXmlRun -Text 'Confidential' -Size 8.5 -Color '506675' -Italic)<w:r><w:tab/></w:r>$(New-OpenXmlRun -Text "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved" -Size 8.5 -Color '506675')<w:r><w:tab/></w:r>$(New-OpenXmlRun -Text 'Page ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>$(New-OpenXmlRun -Text ' of ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="NUMPAGES"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>
 "@
     $contentTypes = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2002,7 +2029,15 @@ function New-WordHealthReport {
         if ($hasSystemInformation) {
             Add-WordHeading $document 'System Information' 1
             foreach ($item in $systemSections) {
-                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]) -OmitNAValues:($item[0] -in @('Memory', 'Network')))
+                $recordArguments = @{
+                    Data = $Data
+                    PropertyName = $item[1]
+                    PropertyMap = [bool]$item[2]
+                    OmitNAValues = $item[0] -in @('Memory', 'Network')
+                    OmitRecordsWithNA = $item[0] -in @('Memory', 'Network')
+                }
+                if ($item[0] -eq 'Network') { $recordArguments.KeepRecordsWithValuesIn = @('IP address') }
+                $records = @(Get-ReportRecords @recordArguments)
                 if ($records.Count -eq 0) { continue }
                 Add-WordHeading $document $item[0] 2
                 Add-WordTable $document $records 'No records were returned.'
@@ -2030,7 +2065,7 @@ function New-WordHealthReport {
         if ($hasPowerThermal) {
             Add-WordHeading $document 'Power & Thermal' 1
             foreach ($item in $powerSections) {
-                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -OmitNAValues:($item[0] -eq 'Temperatures'))
+                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -OmitNAValues:($item[0] -eq 'Temperatures') -OmitRecordsWithNA:($item[0] -eq 'Temperatures'))
                 if ($records.Count -eq 0) { continue }
                 Add-WordHeading $document $item[0] 2
                 Add-WordTable $document $records 'No records were returned.'
