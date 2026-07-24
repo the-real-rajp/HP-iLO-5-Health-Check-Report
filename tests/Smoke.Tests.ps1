@@ -170,6 +170,9 @@ Assert-Equal $computeOps.'Workspace ID' 'workspace-123' 'Compute Ops Management 
 if ($computeOps.PSObject.Properties.Name -contains 'Failure reason') {
     throw 'Compute Ops Management output should not contain Failure reason.'
 }
+if ($computeOps.PSObject.Properties.Name -contains 'Next retry time') {
+    throw 'Compute Ops Management output should not contain Next retry time.'
+}
 Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ 'Connection status' = 'ConnectionFailed' })) 'CRITICAL' 'Failed Compute Ops connection should be critical'
 if ($computeOps.PSObject.Properties.Name -contains 'Activation key' -or
     (($computeOps.PSObject.Properties.Value | ForEach-Object { [string]$_ }) -join ' ') -match 'must-not-be-reported') {
@@ -185,7 +188,7 @@ $systemNic = Convert-SystemNetworkInterface ([PSCustomObject]@{
     Status = [PSCustomObject]@{ Health = 'OK' }
 })
 Assert-Equal $systemNic.'MAC address' '00:11:22:33:44:66' 'System network MAC conversion failed'
-Assert-Equal $systemNic.'IPv4 addresses' '192.0.2.30' 'System network IPv4 conversion failed'
+Assert-Equal $systemNic.'IP address' '192.0.2.30' 'System network IP conversion failed'
 
 $deviceRecord = Convert-DeviceInventory ([PSCustomObject]@{
     Name = 'Smart Array'
@@ -197,7 +200,9 @@ $deviceRecord = Convert-DeviceInventory ([PSCustomObject]@{
 })
 Assert-Equal $deviceRecord.Location 'Embedded RAID' 'Device inventory location conversion failed'
 Assert-Equal $deviceRecord.'Firmware version' '6.52' 'Device inventory firmware conversion failed'
-Assert-Equal $deviceRecord.Status 'Enabled' 'Device inventory status conversion failed'
+Assert-Equal $deviceRecord.Status 'OK' 'Device inventory status conversion failed'
+$percentFan = Convert-Fan ([PSCustomObject]@{ Name = 'Fan 2'; Reading = 23; ReadingUnits = 'Percent'; Status = [PSCustomObject]@{ Health = 'OK' } })
+Assert-Equal $percentFan.Reading '23%' 'Percent fan reading should include the percent symbol'
 $absentDeviceData = [PSCustomObject]@{
     DeviceInventory = @([PSCustomObject]@{ Location = 'Empty slot'; Status = 'Absent' })
 }
@@ -358,7 +363,7 @@ $nativeReportData = [PSCustomObject]@{
         Name = 'Embedded LOM 1'
         Type = 'Ethernet interface'
         'MAC address' = '00:11:22:33:44:66'
-        'IPv4 addresses' = '192.0.2.30'
+        'IP address' = '192.0.2.30'
         Link = 'LinkUp'
         'Speed (Mbps)' = 1000
         Health = 'OK'

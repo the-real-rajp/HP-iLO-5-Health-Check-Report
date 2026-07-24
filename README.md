@@ -45,8 +45,9 @@ manager identifier.
 
 - Windows 10, Windows 11, or Windows Server
 - Windows PowerShell 5.1 or PowerShell 7
-- Desktop Microsoft Word is optional. When it is unavailable, the script uses
-  its built-in Open XML generator to create the `.docx` directly.
+- Desktop Microsoft Word is optional. The script uses its built-in Open XML
+  generator by default for consistent branded output; set
+  `HP_ILO_USE_WORD_COM=1` only to opt into the legacy Word automation path.
 - HTTPS network access to the iLO management interface
 - An iLO account with read access to the requested Redfish resources
 

@@ -5,8 +5,8 @@ Creates a Microsoft Word health report for an HPE iLO 5 server.
 .DESCRIPTION
 Uses Redfish session authentication, dynamically follows advertised resource
 links, collects read-only health information, and creates a formatted .docx
-report. Microsoft Word COM automation is used when available; otherwise the
-script creates the DOCX directly with its built-in Open XML generator.
+report with its built-in Open XML generator. Microsoft Word COM automation is
+available only as an explicit opt-in.
 #>
 
 [CmdletBinding()]
@@ -41,6 +41,7 @@ $script:WdPreferredWidthPoints = 3
 $script:ReportBlue = '005F9E'
 $script:ReportDark = '404040'
 $script:ReportStripe = 'F2F7FB'
+$script:ReportLogoPath = Join-Path $PSScriptRoot 'assets\winslowtg-logo.png'
 
 function Get-ObjectProperty {
     param(
@@ -387,7 +388,6 @@ function Convert-ComputeOpsManagement {
         'Supported' = if ($null -eq $cloudConnect) { 'Not advertised' } else { 'Yes' }
         'Connection status' = Get-ObjectProperty $cloudConnect 'CloudConnectStatus' 'Unknown'
         'Workspace ID' = Get-ObjectProperty $cloudConnect 'WorkspaceId' 'Not reported'
-        'Next retry time' = Get-ObjectProperty $cloudConnect 'NextRetryTime' 'N/A'
     }
 }
 
@@ -397,8 +397,12 @@ function Convert-SystemNetworkInterface {
         [string]$Type = 'Ethernet interface'
     )
 
-    $ipv4Addresses = @(Get-ObjectProperty $Item 'IPv4Addresses' @())
-    $ipv4 = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'Address' } | Where-Object { $_ }) -join '; '
+    $ipAddresses = @(
+        @(Get-ObjectProperty $Item 'IPv4Addresses' @()) +
+        @(Get-ObjectProperty $Item 'IPv6Addresses' @()) |
+            ForEach-Object { Get-ObjectProperty $_ 'Address' } |
+            Where-Object { $_ }
+    ) -join '; '
     $ethernet = Get-ObjectProperty $Item 'Ethernet'
     $macAddress = Get-ObjectProperty $Item 'MACAddress' (Get-ObjectProperty $ethernet 'MACAddress' 'Unknown')
     $speed = Get-ObjectProperty $Item 'SpeedMbps' (Get-ObjectProperty $Item 'CurrentLinkSpeedMbps' 'N/A')
@@ -407,7 +411,7 @@ function Convert-SystemNetworkInterface {
         'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Unknown')
         'Type' = $Type
         'MAC address' = $macAddress
-        'IPv4 addresses' = if ($ipv4) { $ipv4 } else { 'Not reported' }
+        'IP address' = if ($ipAddresses) { $ipAddresses } else { 'N/A' }
         'Link' = Get-ObjectProperty $Item 'LinkStatus' 'Unknown'
         'Speed (Mbps)' = $speed
         'Health' = Get-HealthValue $Item
@@ -423,7 +427,7 @@ function Convert-DeviceInventory {
     if (-not $versionString -and $firmwareVersion -is [string]) { $versionString = $firmwareVersion }
     $health = Get-HealthValue $Item
     $state = Get-StateValue $Item
-    $displayStatus = if ($health -match '(?i)critical|warning|degraded|failed') { $health } else { $state }
+    $displayStatus = if ($health -and $health -notmatch '(?i)^unknown$') { $health } else { $state }
     [PSCustomObject][ordered]@{
         'Location' = Get-ObjectProperty $Item 'Location' 'Unknown'
         'Product name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Model' (Get-ObjectProperty $Item 'Id' 'Unknown'))
@@ -471,10 +475,15 @@ function Convert-Temperature {
 
 function Convert-Fan {
     param([Parameter(Mandatory)][object]$Item)
+    $units = Get-ObjectProperty $Item 'ReadingUnits' 'N/A'
+    $reading = Get-ObjectProperty $Item 'Reading' 'N/A'
+    if ($units -match '(?i)^percent$' -and $reading -notmatch '(?i)^n/?a$' -and [string]$reading -notmatch '%$') {
+        $reading = "$reading%"
+    }
     [PSCustomObject][ordered]@{
         'Name' = Get-ObjectProperty $Item 'Name' 'Unknown'
-        'Reading' = Get-ObjectProperty $Item 'Reading' 'N/A'
-        'Units' = Get-ObjectProperty $Item 'ReadingUnits' 'N/A'
+        'Reading' = $reading
+        'Units' = $units
         'Health' = Get-HealthValue $Item
     }
 }
@@ -517,11 +526,19 @@ function Test-UnknownReportValue {
     return ([string]$Value).Trim() -match '(?i)^(unknown|absent)?$'
 }
 
+function Test-NotApplicableReportValue {
+    param([AllowNull()][object]$Value)
+
+    return $null -ne $Value -and ([string]$Value).Trim() -match '(?i)^n/?a$'
+}
+
 function Get-ReportRecords {
     param(
-        [Parameter(Mandatory)][object]$Data,
-        [Parameter(Mandatory)][string]$PropertyName,
-        [switch]$PropertyMap
+    [Parameter(Mandatory)][object]$Data,
+    [Parameter(Mandatory)][string]$PropertyName,
+        [switch]$PropertyMap,
+        [string[]]$ExcludeColumns = @(),
+        [switch]$OmitNAValues
     )
 
     $property = $Data.PSObject.Properties[$PropertyName]
@@ -544,8 +561,10 @@ function Get-ReportRecords {
     }
     $usefulColumns = @($columns | Where-Object {
         $columnName = $_
+        if ($columnName -in $ExcludeColumns) { return $false }
         @($records | Where-Object {
-            -not (Test-UnknownReportValue (Get-ObjectProperty $_ $columnName))
+            $value = Get-ObjectProperty $_ $columnName
+            -not (Test-UnknownReportValue $value) -and (-not $OmitNAValues -or -not (Test-NotApplicableReportValue $value))
         }).Count -gt 0
     })
     if ($usefulColumns.Count -eq 0) { return @() }
@@ -555,7 +574,7 @@ function Get-ReportRecords {
         $row = [ordered]@{}
         foreach ($columnName in $usefulColumns) {
             $value = Get-ObjectProperty $source $columnName
-            $row[$columnName] = if (Test-UnknownReportValue $value) { '' } else { $value }
+            $row[$columnName] = if ((Test-UnknownReportValue $value) -or ($OmitNAValues -and (Test-NotApplicableReportValue $value))) { '' } else { $value }
         }
         [PSCustomObject]$row
     })
@@ -748,14 +767,12 @@ function Get-IloHealthData {
     $statusInformation.Add([PSCustomObject][ordered]@{
         'Component' = 'Server'
         'Health' = Get-HealthValue $system
-        'State' = Get-StateValue $system
         'Detail' = "Power: $(Get-ObjectProperty $system 'PowerState' 'Unknown')"
     })
     foreach ($manager in $managers) {
         $statusInformation.Add([PSCustomObject][ordered]@{
             'Component' = Get-ObjectProperty $manager 'Name' (Get-ObjectProperty $manager 'Id' 'iLO Manager')
             'Health' = Get-HealthValue $manager
-            'State' = Get-StateValue $manager
             'Detail' = "Firmware: $(Get-ObjectProperty $manager 'FirmwareVersion' 'Unknown')"
         })
     }
@@ -1380,38 +1397,52 @@ function Set-WordReportFurniture {
         [Parameter(Mandatory)][string]$ReportDate
     )
 
-    $header = $Section.Headers.Item(1).Range
-    $header.Text = "HP iLO Check - $Target - $CustomerName`t$ReportDate"
-    $header.Font.Name = 'Aptos'
-    $header.Font.Size = 9
-    $header.Font.Color = ConvertTo-WordColor $script:ReportDark
-    $header.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
-    $headerBorder = $header.Paragraphs.Item(1).Borders.Item($script:WdBorderBottom)
-    $headerBorder.LineStyle = 1
-    $headerBorder.LineWidth = 4
-    $headerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+    if (-not (Test-Path $script:ReportLogoPath)) {
+        throw "The WinslowTG logo is missing: $script:ReportLogoPath"
+    }
+    $Section.PageSetup.DifferentFirstPageHeaderFooter = 0
+    $Section.PageSetup.OddAndEvenPagesHeaderFooter = 0
 
-    $footer = $Section.Footers.Item(1).Range
-    $footer.Text = "Confidential`tPage "
-    $footer.Font.Name = 'Aptos'
-    $footer.Font.Size = 9
-    $footer.Font.Color = ConvertTo-WordColor $script:ReportDark
-    $footer.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
-    $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Italic = -1
-    $footer.Paragraphs.Item(1).Range.Words.Item(1).Font.Color = ConvertTo-WordColor '888888'
-    $pageRange = $Section.Footers.Item(1).Range.Duplicate
-    $pageRange.SetRange($pageRange.End - 1, $pageRange.End - 1)
-    $pageRange.Fields.Add($pageRange, $script:WdFieldPage) | Out-Null
-    $suffixRange = $Section.Footers.Item(1).Range.Duplicate
-    $suffixRange.SetRange($suffixRange.End - 1, $suffixRange.End - 1)
-    $suffixRange.InsertAfter(' of ')
-    $totalRange = $Section.Footers.Item(1).Range.Duplicate
-    $totalRange.SetRange($totalRange.End - 1, $totalRange.End - 1)
-    $totalRange.Fields.Add($totalRange, $script:WdFieldNumPages) | Out-Null
-    $footerBorder = $Section.Footers.Item(1).Range.Paragraphs.Item(1).Borders.Item($script:WdBorderTop)
-    $footerBorder.LineStyle = 1
-    $footerBorder.LineWidth = 4
-    $footerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+    # Populate every header/footer variant for template compatibility.
+    foreach ($headerIndex in 1..3) {
+        $Section.Headers.Item($headerIndex).LinkToPrevious = $false
+        $header = $Section.Headers.Item($headerIndex).Range
+        $header.Text = "`tHP iLO Check - $Target - $CustomerName"
+        $header.Font.Name = 'Aptos'
+        $header.Font.Size = 9
+        $header.Font.Color = ConvertTo-WordColor $script:ReportDark
+        $header.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
+        $logoRange = $header.Duplicate
+        $logoRange.SetRange($header.Start, $header.Start)
+        [void]$header.InlineShapes.AddPicture($script:ReportLogoPath, $false, $true, $logoRange)
+        $headerBorder = $header.Paragraphs.Item(1).Borders.Item($script:WdBorderBottom)
+        $headerBorder.LineStyle = 1
+        $headerBorder.LineWidth = 4
+        $headerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+    }
+
+    foreach ($footerIndex in 1..3) {
+        $Section.Footers.Item($footerIndex).LinkToPrevious = $false
+        $footer = $Section.Footers.Item($footerIndex).Range
+        $footer.Text = "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved`tPage "
+        $footer.Font.Name = 'Aptos'
+        $footer.Font.Size = 9
+        $footer.Font.Color = ConvertTo-WordColor $script:ReportDark
+        $footer.ParagraphFormat.TabStops.Add(540, 2, 0) | Out-Null
+        $pageRange = $footer.Duplicate
+        $pageRange.SetRange($pageRange.End - 1, $pageRange.End - 1)
+        $pageRange.Fields.Add($pageRange, $script:WdFieldPage) | Out-Null
+        $suffixRange = $footer.Duplicate
+        $suffixRange.SetRange($suffixRange.End - 1, $suffixRange.End - 1)
+        $suffixRange.InsertAfter(' of ')
+        $totalRange = $footer.Duplicate
+        $totalRange.SetRange($totalRange.End - 1, $totalRange.End - 1)
+        $totalRange.Fields.Add($totalRange, $script:WdFieldNumPages) | Out-Null
+        $footerBorder = $footer.Paragraphs.Item(1).Borders.Item($script:WdBorderTop)
+        $footerBorder.LineStyle = 1
+        $footerBorder.LineWidth = 4
+        $footerBorder.Color = ConvertTo-WordColor $script:ReportBlue
+    }
 }
 
 function Add-WordCover {
@@ -1519,7 +1550,7 @@ function Get-OpenXmlColumnWidths {
     param(
         [Parameter(Mandatory)][object[]]$Rows,
         [Parameter(Mandatory)][string[]]$Columns,
-        [int]$TotalWidth = 9360
+        [int]$TotalWidth = 10800
     )
 
     if ($Columns.Count -eq 1) { return ,$TotalWidth }
@@ -1582,7 +1613,7 @@ function New-OpenXmlTable {
     }
 
     return @"
-<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblInd w:w="120" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="80" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="4" w:color="C8D5DF"/><w:left w:val="single" w:sz="4" w:color="C8D5DF"/><w:bottom w:val="single" w:sz="4" w:color="C8D5DF"/><w:right w:val="single" w:sz="4" w:color="C8D5DF"/><w:insideH w:val="single" w:sz="4" w:color="DCE5EB"/><w:insideV w:val="single" w:sz="4" w:color="DCE5EB"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
+<w:tbl><w:tblPr><w:tblW w:w="10800" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="80" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="4" w:color="C8D5DF"/><w:left w:val="single" w:sz="4" w:color="C8D5DF"/><w:bottom w:val="single" w:sz="4" w:color="C8D5DF"/><w:right w:val="single" w:sz="4" w:color="C8D5DF"/><w:insideH w:val="single" w:sz="4" w:color="DCE5EB"/><w:insideV w:val="single" w:sz="4" w:color="DCE5EB"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
 $(New-OpenXmlParagraph -Text '' -After 80 -Size 2)
 "@
 }
@@ -1614,6 +1645,32 @@ function Add-OpenXmlPackageEntry {
     }
 }
 
+function Add-OpenXmlBinaryPackageEntry {
+    param(
+        [Parameter(Mandatory)][object]$Archive,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SourcePath
+    )
+
+    $entry = $Archive.CreateEntry($Path)
+    $destination = $entry.Open()
+    $source = $null
+    try {
+        $source = [IO.File]::OpenRead($SourcePath)
+        $source.CopyTo($destination)
+    }
+    finally {
+        if ($null -ne $source) { $source.Dispose() }
+        $destination.Dispose()
+    }
+}
+
+function New-OpenXmlLogoRun {
+    return @'
+<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="751840" cy="228600"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="Winslow Technology Group logo" descr="Winslow Technology Group logo"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="winslowtg-logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="751840" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
+'@
+}
+
 function New-OpenXmlHealthReport {
     [CmdletBinding()]
     param(
@@ -1625,6 +1682,9 @@ function New-OpenXmlHealthReport {
     $resolved = [IO.Path]::GetFullPath($OutputPath)
     $directory = Split-Path -Parent $resolved
     if (-not (Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    if (-not (Test-Path $script:ReportLogoPath)) {
+        throw "The WinslowTG logo is missing: $script:ReportLogoPath"
+    }
 
     $reportDate = Get-Date -Format 'MMMM d, yyyy'
     $displayTarget = ([uri]$Data.Target).Host
@@ -1656,7 +1716,7 @@ function New-OpenXmlHealthReport {
             'Severity ' = if ($null -ne $right) { $right.Status } else { '' }
         }
     }
-    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Severity', 'Assessment ', 'Severity ') -Widths @(3000, 1680, 3000, 1680) -StatusColumns))
+    [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Assessment', 'Severity', 'Assessment ', 'Severity ') -Widths @(3460, 1940, 3460, 1940) -StatusColumns))
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
     foreach ($item in @(
@@ -1665,11 +1725,11 @@ function New-OpenXmlHealthReport {
         @('Status', 'StatusInformation', $false),
         @('HPE Compute Ops Management', 'ComputeOpsManagement', $false)
     )) {
-        $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
+        $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]) -ExcludeColumns $(if ($item[0] -eq 'Status') { @('State') } elseif ($item[0] -eq 'HPE Compute Ops Management') { @('Next retry time') } else { @() }))
         if ($records.Count -eq 0) { continue }
         [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
         $tableArguments = @{ Rows = $records; StatusColumns = $true }
-        if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(2700, 6660) }
+        if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(3000, 7800) }
         [void]$body.Add((New-OpenXmlTable @tableArguments))
     }
 
@@ -1678,7 +1738,7 @@ function New-OpenXmlHealthReport {
         $registrationRows = @(Get-ReportPropertyRows $remoteSupportRows[0])
         [void]$body.Add((New-OpenXmlParagraph -Text 'Remote Support' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
         [void]$body.Add((New-OpenXmlParagraph -Text 'Registration' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
-        [void]$body.Add((New-OpenXmlTable -Rows $registrationRows -Columns @('Item', 'Value') -Widths @(2700, 6660) -StatusColumns))
+        [void]$body.Add((New-OpenXmlTable -Rows $registrationRows -Columns @('Item', 'Value') -Widths @(3000, 7800) -StatusColumns))
     }
 
     $securityRows = @(Get-ReportRecords -Data $Data -PropertyName 'SecurityDashboard')
@@ -1696,7 +1756,7 @@ function New-OpenXmlHealthReport {
         @('Storage', 'Storage', $false)
     )
     $systemSectionRecords = @($systemSections | ForEach-Object {
-        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -PropertyMap:([bool]$_[2])), [bool]$_[2])
+        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -PropertyMap:([bool]$_[2]) -OmitNAValues:($_[0] -in @('Memory', 'Network'))), [bool]$_[2])
     })
     if (@($systemSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
         [void]$body.Add((New-OpenXmlParagraph -Text 'System Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
@@ -1705,7 +1765,7 @@ function New-OpenXmlHealthReport {
             if ($records.Count -eq 0) { continue }
             [void]$body.Add((New-OpenXmlParagraph -Text $item[0] -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
             $tableArguments = @{ Rows = $records; StatusColumns = $true }
-            if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(2700, 6660) }
+            if ([bool]$item[2]) { $tableArguments.Columns = @('Item', 'Value'); $tableArguments.Widths = @(3000, 7800) }
             [void]$body.Add((New-OpenXmlTable @tableArguments))
         }
     }
@@ -1722,7 +1782,7 @@ function New-OpenXmlHealthReport {
         @('Temperatures', 'Temperatures')
     )
     $powerSectionRecords = @($powerSections | ForEach-Object {
-        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1]))
+        ,@($_[0], @(Get-ReportRecords -Data $Data -PropertyName $_[1] -OmitNAValues:($_[0] -eq 'Temperatures')))
     })
     if (@($powerSectionRecords | Where-Object { $_[1].Count -gt 0 }).Count -gt 0) {
         [void]$body.Add((New-OpenXmlParagraph -Text 'Power & Thermal' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext))
@@ -1736,7 +1796,7 @@ function New-OpenXmlHealthReport {
 
     $documentXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>$($body -join '')<w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:footerReference w:type="default" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>$($body -join '')<w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:headerReference w:type="first" r:id="rId1"/><w:headerReference w:type="even" r:id="rId1"/><w:footerReference w:type="default" r:id="rId2"/><w:footerReference w:type="first" r:id="rId2"/><w:footerReference w:type="even" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="432" w:footer="432" w:gutter="0"/></w:sectPr></w:body></w:document>
 "@
     $stylesXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1748,15 +1808,15 @@ function New-OpenXmlHealthReport {
 "@
     $headerXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:after="80"/></w:pPr>$(New-OpenXmlRun -Text "HP iLO Check - $displayTarget - $CustomerName" -Size 8.5 -Color '506675')$(New-OpenXmlRun -Text "`t$reportDate" -Size 8.5 -Color '506675')</w:p></w:hdr>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="10800"/></w:tabs><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:after="80"/></w:pPr>$(New-OpenXmlLogoRun)<w:r><w:tab/></w:r>$(New-OpenXmlRun -Text "HP iLO Check - $displayTarget - $CustomerName" -Size 8.5 -Color '506675')</w:p></w:hdr>
 "@
     $footerXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs><w:pBdr><w:top w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:before="80"/></w:pPr>$(New-OpenXmlRun -Text 'Confidential' -Size 8.5 -Color '888888' -Italic)$(New-OpenXmlRun -Text "`tPage " -Size 8.5 -Color '506675')<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>$(New-OpenXmlRun -Text ' of ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="NUMPAGES"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="10800"/></w:tabs><w:pBdr><w:top w:val="single" w:sz="6" w:space="4" w:color="005F9E"/></w:pBdr><w:spacing w:before="80"/></w:pPr>$(New-OpenXmlRun -Text "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved" -Size 8.5 -Color '506675')<w:r><w:tab/></w:r>$(New-OpenXmlRun -Text 'Page ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>$(New-OpenXmlRun -Text ' of ' -Size 8.5 -Color '506675')<w:fldSimple w:instr="NUMPAGES"><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="17"/><w:color w:val="506675"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>
 "@
     $contentTypes = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>
 "@
     $rootRelationships = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1765,6 +1825,10 @@ function New-OpenXmlHealthReport {
     $documentRelationships = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>
+"@
+    $headerRelationships = @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/winslowtg-logo.png"/></Relationships>
 "@
     $created = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
     $coreXml = @"
@@ -1789,6 +1853,8 @@ function New-OpenXmlHealthReport {
         Add-OpenXmlPackageEntry $archive 'word/numbering.xml' $numberingXml
         Add-OpenXmlPackageEntry $archive 'word/_rels/document.xml.rels' $documentRelationships
         Add-OpenXmlPackageEntry $archive 'word/header1.xml' $headerXml
+        Add-OpenXmlPackageEntry $archive 'word/_rels/header1.xml.rels' $headerRelationships
+        Add-OpenXmlBinaryPackageEntry $archive 'word/media/winslowtg-logo.png' $script:ReportLogoPath
         Add-OpenXmlPackageEntry $archive 'word/footer1.xml' $footerXml
         Add-OpenXmlPackageEntry $archive 'docProps/core.xml' $coreXml
         Add-OpenXmlPackageEntry $archive 'docProps/app.xml' $appXml
@@ -1807,7 +1873,10 @@ function New-WordHealthReport {
         [Parameter(Mandatory)][string]$CustomerName
     )
 
-    if ($env:OS -ne 'Windows_NT') {
+    # The self-contained generator produces a stable, fully branded report
+    # across Word versions. Set HP_ILO_USE_WORD_COM=1 only to opt into the
+    # legacy Word automation path.
+    if ($env:OS -ne 'Windows_NT' -or $env:HP_ILO_USE_WORD_COM -ne '1') {
         return New-OpenXmlHealthReport -Data $Data -OutputPath $OutputPath -CustomerName $CustomerName
     }
     $word = $null
@@ -1867,7 +1936,7 @@ function New-WordHealthReport {
             @('Status', 'StatusInformation', $false),
             @('HPE Compute Ops Management', 'ComputeOpsManagement', $false)
         )) {
-            $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
+        $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]) -ExcludeColumns $(if ($item[0] -eq 'Status') { @('State') } elseif ($item[0] -eq 'HPE Compute Ops Management') { @('Next retry time') } else { @() }))
             if ($records.Count -eq 0) { continue }
             Add-WordHeading $document $item[0] 2
             Add-WordTable $document $records 'No records were returned.'
@@ -1905,7 +1974,7 @@ function New-WordHealthReport {
         if ($hasSystemInformation) {
             Add-WordHeading $document 'System Information' 1
             foreach ($item in $systemSections) {
-                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]))
+                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -PropertyMap:([bool]$item[2]) -OmitNAValues:($item[0] -in @('Memory', 'Network')))
                 if ($records.Count -eq 0) { continue }
                 Add-WordHeading $document $item[0] 2
                 Add-WordTable $document $records 'No records were returned.'
@@ -1933,7 +2002,7 @@ function New-WordHealthReport {
         if ($hasPowerThermal) {
             Add-WordHeading $document 'Power & Thermal' 1
             foreach ($item in $powerSections) {
-                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1])
+                $records = @(Get-ReportRecords -Data $Data -PropertyName $item[1] -OmitNAValues:($item[0] -eq 'Temperatures'))
                 if ($records.Count -eq 0) { continue }
                 Add-WordHeading $document $item[0] 2
                 Add-WordTable $document $records 'No records were returned.'
