@@ -1182,6 +1182,17 @@ function Get-RemoteSupportAssessmentStatus {
     return $null
 }
 
+function Get-ComputeOpsAssessmentEvidence {
+    param([AllowEmptyCollection()][object[]]$Rows)
+
+    # Compute Ops Management is optional.  An unconfigured connection should
+    # remain visible in the report without lowering the Information assessment.
+    return @($Rows | Where-Object {
+        $connectionStatus = [string](Get-ObjectProperty $_ 'Connection status' '')
+        $connectionStatus -notmatch '(?i)^not\s*enabled$'
+    })
+}
+
 function New-AssessmentSummary {
     param([Parameter(Mandatory)][object]$Data)
 
@@ -1196,10 +1207,11 @@ function New-AssessmentSummary {
         @((Get-ObjectProperty $Data 'PowerSupplies' @()))
     $performance = @((Get-ObjectProperty $Data 'Memory' @())) +
         @((Get-ObjectProperty $Data 'Processors' @()))
+    $computeOpsEvidence = @(Get-ComputeOpsAssessmentEvidence @((Get-ObjectProperty $Data 'ComputeOpsManagement' @())))
     $informationEvidence = @((Get-ObjectProperty $Data 'ServerStatus' @())) +
         @((Get-ObjectProperty $Data 'IloInformation' @())) +
         @((Get-ObjectProperty $Data 'StatusInformation' @())) +
-        @((Get-ObjectProperty $Data 'ComputeOpsManagement' @()))
+        $computeOpsEvidence
     $systemEvidence = @((Get-ObjectProperty $Data 'ServerStatus' @())) +
         @((Get-ObjectProperty $Data 'Processors' @())) +
         @((Get-ObjectProperty $Data 'Memory' @())) +

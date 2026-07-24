@@ -290,6 +290,7 @@ $assessmentData = [PSCustomObject]@{
     Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    ComputeOpsManagement = @([PSCustomObject]@{ 'Connection status' = 'NotEnabled' })
     RemoteSupportRegistration = @([PSCustomObject]@{ Registration = 'Registered'; 'Last transmission error' = 'None' })
     IloDedicatedNetworkPort = $dedicatedInterface.Rows
     IloSharedNetworkPort = $sharedInterface.Rows
