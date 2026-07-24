@@ -13,8 +13,9 @@ The report covers:
 - memory
 - processors
 - firmware
+- iLO Dedicated and Shared Network Port configuration
 - Integrated Management Log, iLO Event Log, and other advertised log services
-- iLO Security Dashboard overall status, risks, and recommended actions
+- iLO Security Dashboard overall status and risks
 - empty detail sections and hardware records reported as `Absent` are omitted
 - transient iLO connection failures are retried and duplicate notes are suppressed
 
@@ -23,7 +24,11 @@ page followed by an Executive Overview with a Recommended Action,
 fourteen-section Assessment Summary, and detailed evidence tables. Storage
 evidence represents controllers, physical drives, and logical volumes when iLO
 advertises them. Administration event-log evidence is limited to entries with
-`Critical` severity from the previous month.
+`Critical` severity from the previous month. A Dedicated or Shared Network Port
+that is not configured for iLO is marked `IGNORED`; the Shared Network Port
+section still lists its advertised interface, IP, VLAN, NIC, and port settings.
+An `Ignored` Overall Security Status is treated as healthy, and individual
+Security Dashboard findings with `Ignored = True` display `Ignored`.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or

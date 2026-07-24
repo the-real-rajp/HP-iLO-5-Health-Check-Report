@@ -61,9 +61,65 @@ $securityParameter = Convert-SecurityParameter ([PSCustomObject]@{
     Ignore = $false
 })
 Assert-Equal $securityParameter.'Security status' 'Risk' 'Security Dashboard status conversion failed'
+if ($securityParameter.PSObject.Properties.Name -contains 'Recommended action') {
+    throw 'Security Dashboard output should not contain Recommended action.'
+}
 Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'CRITICAL' 'An unignored Security Dashboard risk must be critical'
-$securityParameter.Ignored = $true
-Assert-Equal (Get-AssessmentStatus @($securityParameter)) 'RECOMMENDED' 'An ignored Security Dashboard risk should be recommended'
+$ignoredSecurityParameter = Convert-SecurityParameter ([PSCustomObject]@{
+    Name = 'Ignored security setting'
+    SecurityStatus = 'Risk'
+    State = 'Enabled'
+    Ignore = $true
+})
+Assert-Equal $ignoredSecurityParameter.'Security status' 'Ignored' 'An ignored Security Dashboard item should display Ignored'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityParameter)) 'HEALTHY' 'An ignored Security Dashboard item should not reduce section health'
+$ignoredSecurityOverview = Convert-SecurityDashboardOverview ([PSCustomObject]@{
+    OverallSecurityStatus = 'Ignored'
+    ServerConfigurationLockStatus = 'Disabled'
+})
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview, $securityParameter)) 'HEALTHY' 'Ignored Overall Security Status should mark Security healthy'
+
+$firmwareRecord = Convert-Firmware ([PSCustomObject]@{
+    Name = 'iLO 5'
+    Version = '3.10'
+    Updateable = $true
+})
+if ($firmwareRecord.PSObject.Properties.Name -contains 'State') {
+    throw 'Firmware report output should not contain State.'
+}
+
+$sharedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
+    Name = 'Manager Shared Network Interface'
+    InterfaceEnabled = $true
+    LinkStatus = 'LinkUp'
+    MACAddress = '00:11:22:33:44:55'
+    PermanentMACAddress = '00:11:22:33:44:55'
+    IPv4Addresses = @([PSCustomObject]@{
+        Address = '192.0.2.20'
+        AddressOrigin = 'Static'
+        SubnetMask = '255.255.255.0'
+        Gateway = '192.0.2.1'
+    })
+    Status = [PSCustomObject]@{ Health = 'OK' }
+    Oem = [PSCustomObject]@{
+        Hpe = [PSCustomObject]@{
+            InterfaceType = 'Shared'
+            SharedNetworkPortOptions = [PSCustomObject]@{ NIC = 'LOM'; Port = 1 }
+        }
+    }
+})
+Assert-Equal $sharedInterface.InterfaceType 'Shared' 'Shared iLO interface type conversion failed'
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $sharedInterface.Rows) 'HEALTHY' 'Enabled shared iLO network interface should be healthy'
+Assert-Equal (@($sharedInterface.Rows | Where-Object Setting -eq 'Shared NIC')[0].Value) 'LOM' 'Shared NIC configuration was not collected'
+$dedicatedInterface = Convert-IloNetworkInterface ([PSCustomObject]@{
+    Name = 'Manager Dedicated Network Interface'
+    InterfaceEnabled = $false
+    LinkStatus = 'NoLink'
+    Status = [PSCustomObject]@{ Health = 'OK' }
+    Oem = [PSCustomObject]@{ Hpe = [PSCustomObject]@{ InterfaceType = 'Dedicated' } }
+})
+Assert-Equal (Get-IloNetworkPortAssessmentStatus $dedicatedInterface.Rows) 'IGNORED' 'Unconfigured dedicated iLO NIC should be ignored'
+Assert-Equal (@($dedicatedInterface.Rows | Where-Object Setting -eq 'Assessment note')[0].Value) 'iLO is not configured to use this NIC.' 'Dedicated NIC ignore note is missing'
 
 $server = Convert-ServerStatus ([PSCustomObject]@{
     Name = 'Server'
@@ -97,6 +153,8 @@ $assessmentData = [PSCustomObject]@{
     Processors = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Firmware = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
     Management = @([PSCustomObject]@{ Health = 'OK'; State = 'Enabled' })
+    IloDedicatedNetworkPort = $dedicatedInterface.Rows
+    IloSharedNetworkPort = $sharedInterface.Rows
     EventLogs = @(
         [PSCustomObject]@{ Created = '2026-07-20T10:00:00Z'; Severity = 'Critical'; Log = 'Integrated Management Log'; Message = 'Recent critical event'; Repaired = $false }
         [PSCustomObject]@{ Created = '2026-07-20T11:00:00Z'; Severity = 'Warning'; Log = 'Integrated Management Log'; Message = 'Recent warning event'; Repaired = $false }
@@ -117,6 +175,8 @@ Assert-Equal (($assessment.Section -join '|')) ($expectedSections -join '|') 'As
 Assert-Equal $assessment[0].Status 'HEALTHY' 'Healthy assessment evidence was not recognized'
 Assert-Equal $assessment[5].Status 'HEALTHY' 'A column name containing critical must not create a critical assessment'
 Assert-Equal $assessment[3].Status 'RECOMMENDED' 'Unavailable assessment evidence should be recommended'
+Assert-Equal $assessment[7].Status 'IGNORED' 'Unconfigured dedicated iLO NIC assessment should be ignored'
+Assert-Equal $assessment[8].Status 'HEALTHY' 'Configured shared iLO NIC assessment should be healthy'
 Assert-Equal $assessment[10].Status 'CRITICAL' 'A recent critical event should make Administration critical'
 Assert-Equal $assessment[11].Status 'HEALTHY' 'A healthy Security Dashboard should produce a healthy Security assessment'
 $criticalRecentEvents = @(Get-CriticalRecentEventLogs $assessmentData)
@@ -179,6 +239,8 @@ $nativeReportData = [PSCustomObject]@{
         Version = '3.10'
         Updateable = $true
     })
+    IloDedicatedNetworkPort = $dedicatedInterface.Rows
+    IloSharedNetworkPort = $sharedInterface.Rows
     Management = @([PSCustomObject][ordered]@{
         Name = 'iLO 5'
         Firmware = '3.10'
@@ -188,7 +250,6 @@ $nativeReportData = [PSCustomObject]@{
         Name = 'Security State'
         'Security status' = 'Ok'
         Ignored = $false
-        'Recommended action' = ''
     })
     EventLogs = @(
         [PSCustomObject][ordered]@{
@@ -243,7 +304,15 @@ try {
         $reader = New-Object IO.StreamReader($documentEntry.Open())
         try { $documentText = $reader.ReadToEnd() }
         finally { $reader.Dispose() }
-        foreach ($expectedText in @('Recommended Action', 'Assessment Summary', 'Security Dashboard', 'Recent critical event for report validation.')) {
+        foreach ($expectedText in @(
+            'Recommended Action',
+            'Assessment Summary',
+            'Security Dashboard',
+            'iLO Dedicated Network Port',
+            'iLO Shared Network Port',
+            'Shared NIC',
+            'Recent critical event for report validation.'
+        )) {
             if ($documentText -notmatch [regex]::Escape($expectedText)) {
                 throw "Native DOCX is missing expected text: $expectedText."
             }

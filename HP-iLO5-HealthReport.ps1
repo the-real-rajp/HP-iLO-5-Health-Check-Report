@@ -426,7 +426,6 @@ function Convert-Firmware {
         'Version' = Get-ObjectProperty $Item 'Version' 'Unknown'
         'Updateable' = Get-ObjectProperty $Item 'Updateable' 'Unknown'
         'Health' = Get-HealthValue $Item
-        'State' = Get-StateValue $Item
     }
 }
 
@@ -454,7 +453,6 @@ function Convert-SecurityDashboardOverview {
         'Name' = 'Overall Security Status'
         'Security status' = Get-ObjectProperty $Dashboard 'OverallSecurityStatus' 'Unknown'
         'Current value' = "Server configuration lock: $(Get-ObjectProperty $Dashboard 'ServerConfigurationLockStatus' 'Unknown')"
-        'Recommended action' = ''
         'Ignored' = $false
     }
 }
@@ -462,12 +460,73 @@ function Convert-SecurityDashboardOverview {
 function Convert-SecurityParameter {
     param([Parameter(Mandatory)][object]$Item)
 
+    $ignored = [bool](Get-ObjectProperty $Item 'Ignore' $false)
     [PSCustomObject][ordered]@{
         'Name' = Get-ObjectProperty $Item 'Name' (Get-ObjectProperty $Item 'Id' 'Security parameter')
-        'Security status' = Get-ObjectProperty $Item 'SecurityStatus' 'Unknown'
+        'Security status' = if ($ignored) { 'Ignored' } else { Get-ObjectProperty $Item 'SecurityStatus' 'Unknown' }
         'Current value' = Get-ObjectProperty $Item 'State' 'Unknown'
-        'Recommended action' = Get-ObjectProperty $Item 'RecommendedAction' ''
-        'Ignored' = [bool](Get-ObjectProperty $Item 'Ignore' $false)
+        'Ignored' = $ignored
+    }
+}
+
+function Convert-IloNetworkInterface {
+    param([Parameter(Mandatory)][object]$Interface)
+
+    $oem = Get-ObjectProperty $Interface 'Oem'
+    $hpe = Get-ObjectProperty $oem 'Hpe'
+    $interfaceType = [string](Get-ObjectProperty $hpe 'InterfaceType' '')
+    $interfaceName = [string](Get-ObjectProperty $Interface 'Name' (Get-ObjectProperty $Interface 'Id' 'iLO network interface'))
+    if (-not $interfaceType) {
+        if ($interfaceName -match '(?i)dedicated') { $interfaceType = 'Dedicated' }
+        elseif ($interfaceName -match '(?i)shared') { $interfaceType = 'Shared' }
+        else { $interfaceType = 'Unknown' }
+    }
+
+    $enabled = Get-ObjectProperty $Interface 'InterfaceEnabled'
+    if ($null -eq $enabled) { $enabled = Get-ObjectProperty $hpe 'NICEnabled' }
+    $configuredText = if ($null -eq $enabled) { 'Unknown' } elseif ([bool]$enabled) { 'True' } else { 'False' }
+    $ipv4Addresses = @(Get-ObjectProperty $Interface 'IPv4Addresses' @())
+    $ipv4Address = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'Address' } | Where-Object { $_ }) -join '; '
+    $subnetMask = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'SubnetMask' } | Where-Object { $_ }) -join '; '
+    $gateway = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'Gateway' } | Where-Object { $_ }) -join '; '
+    $addressOrigin = @($ipv4Addresses | ForEach-Object { Get-ObjectProperty $_ 'AddressOrigin' } | Where-Object { $_ }) -join '; '
+    $nameServers = @(Get-ObjectProperty $Interface 'NameServers' @()) -join '; '
+    $vlan = Get-ObjectProperty $Interface 'VLAN'
+    $sharedOptions = Get-ObjectProperty $hpe 'SharedNetworkPortOptions'
+
+    $rows = [Collections.Generic.List[object]]::new()
+    foreach ($pair in @(
+        @('Interface name', $interfaceName),
+        @('Interface type', $interfaceType),
+        @('Configured for iLO', $configuredText),
+        @('Link status', (Get-ObjectProperty $Interface 'LinkStatus' 'Unknown')),
+        @('Health', (Get-HealthValue $Interface)),
+        @('Host name', (Get-ObjectProperty $Interface 'HostName' 'Unknown')),
+        @('FQDN', (Get-ObjectProperty $Interface 'FQDN' 'Unknown')),
+        @('MAC address', (Get-ObjectProperty $Interface 'MACAddress' 'Unknown')),
+        @('Permanent MAC address', (Get-ObjectProperty $Interface 'PermanentMACAddress' 'Unknown')),
+        @('Speed (Mbps)', (Get-ObjectProperty $Interface 'SpeedMbps' 'Unknown')),
+        @('Full duplex', (Get-ObjectProperty $Interface 'FullDuplex' 'Unknown')),
+        @('IPv4 address', $(if ($ipv4Address) { $ipv4Address } else { 'Not configured' })),
+        @('IPv4 address origin', $(if ($addressOrigin) { $addressOrigin } else { 'Unknown' })),
+        @('Subnet mask', $(if ($subnetMask) { $subnetMask } else { 'Unknown' })),
+        @('Gateway', $(if ($gateway) { $gateway } else { 'Unknown' })),
+        @('Name servers', $(if ($nameServers) { $nameServers } else { 'Not configured' })),
+        @('VLAN enabled', (Get-ObjectProperty $vlan 'VLANEnable' 'Unknown')),
+        @('VLAN ID', (Get-ObjectProperty $vlan 'VLANId' 'Not configured'))
+    )) {
+        $rows.Add([PSCustomObject][ordered]@{ Setting = $pair[0]; Value = $pair[1] })
+    }
+    if ($interfaceType -eq 'Shared') {
+        $rows.Add([PSCustomObject][ordered]@{ Setting = 'Shared NIC'; Value = Get-ObjectProperty $sharedOptions 'NIC' 'Unknown' })
+        $rows.Add([PSCustomObject][ordered]@{ Setting = 'Shared port'; Value = Get-ObjectProperty $sharedOptions 'Port' 'Unknown' })
+    }
+    if ($configuredText -eq 'False') {
+        $rows.Add([PSCustomObject][ordered]@{ Setting = 'Assessment note'; Value = 'iLO is not configured to use this NIC.' })
+    }
+    return [PSCustomObject]@{
+        InterfaceType = $interfaceType
+        Rows = $rows.ToArray()
     }
 }
 
@@ -500,6 +559,25 @@ function Get-IloHealthData {
         -Uris @((Get-RedfishLink $root 'Managers'), '/redfish/v1/Managers/', '/redfish/v1/Managers') `
         -Notes $notes `
         -Label 'managers')
+
+    $iloDedicatedNetworkPort = @()
+    $iloSharedNetworkPort = @()
+    foreach ($manager in $managers) {
+        $managerUri = Get-ObjectProperty $manager '@odata.id'
+        $ethernetInterfacesUri = Get-RedfishLink $manager 'EthernetInterfaces'
+        if (-not $ethernetInterfacesUri -and $managerUri) {
+            $ethernetInterfacesUri = "$($managerUri.TrimEnd('/'))/EthernetInterfaces"
+        }
+        foreach ($ethernetInterface in @(Get-SafeCollection $Session $ethernetInterfacesUri $notes 'iLO ethernet interfaces')) {
+            $convertedInterface = Convert-IloNetworkInterface $ethernetInterface
+            if ($convertedInterface.InterfaceType -eq 'Dedicated') {
+                $iloDedicatedNetworkPort += $convertedInterface.Rows
+            }
+            elseif ($convertedInterface.InterfaceType -eq 'Shared') {
+                $iloSharedNetworkPort += $convertedInterface.Rows
+            }
+        }
+    }
 
     $temperatures = @()
     $fans = @()
@@ -659,6 +737,8 @@ function Get-IloHealthData {
         Memory = $memory
         Processors = $processors
         Firmware = $firmware
+        IloDedicatedNetworkPort = $iloDedicatedNetworkPort
+        IloSharedNetworkPort = $iloSharedNetworkPort
         Management = $management
         EventLogs = $eventLogs.ToArray()
         SecurityDashboard = $securityDashboard.ToArray()
@@ -743,6 +823,42 @@ function Get-CriticalRecentEventLogs {
     } -Descending
 }
 
+function Get-SecurityAssessmentStatus {
+    param([AllowEmptyCollection()][object[]]$Items)
+
+    $overallStatus = @($Items | Where-Object {
+        [string](Get-ObjectProperty -InputObject $_ -Name 'Name' -Default '') -eq 'Overall Security Status'
+    } | Select-Object -First 1)
+    if ($overallStatus.Count -gt 0 -and
+        [string](Get-ObjectProperty -InputObject $overallStatus[0] -Name 'Security status' -Default '') -match '(?i)^ignored$') {
+        return 'HEALTHY'
+    }
+    $activeItems = @($Items | Where-Object {
+        $ignored = [bool](Get-ObjectProperty -InputObject $_ -Name 'Ignored' -Default $false)
+        $status = [string](Get-ObjectProperty -InputObject $_ -Name 'Security status' -Default '')
+        -not $ignored -and $status -notmatch '(?i)^ignored$'
+    })
+    if ($activeItems.Count -eq 0 -and @($Items).Count -gt 0) { return 'HEALTHY' }
+    return Get-AssessmentStatus $activeItems
+}
+
+function Get-IloNetworkPortAssessmentStatus {
+    param([AllowEmptyCollection()][object[]]$Rows)
+
+    if (@($Rows).Count -eq 0) { return 'RECOMMENDED' }
+    $configuredRow = @($Rows | Where-Object Setting -eq 'Configured for iLO' | Select-Object -First 1)
+    if ($configuredRow.Count -eq 0) { return 'RECOMMENDED' }
+    $configured = [string]$configuredRow[0].Value
+    if ($configured -match '(?i)^false$') { return 'IGNORED' }
+    if ($configured -notmatch '(?i)^true$') { return 'RECOMMENDED' }
+
+    $health = [string](@($Rows | Where-Object Setting -eq 'Health' | Select-Object -First 1).Value)
+    $linkStatus = [string](@($Rows | Where-Object Setting -eq 'Link status' | Select-Object -First 1).Value)
+    if ("$health $linkStatus" -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
+    if ("$health $linkStatus" -match '(?i)warning|degraded|unknown|nolink|linkdown') { return 'RECOMMENDED' }
+    return 'HEALTHY'
+}
+
 function New-AssessmentSummary {
     param([Parameter(Mandatory)][object]$Data)
 
@@ -750,7 +866,8 @@ function New-AssessmentSummary {
     $securityEvents = @($criticalRecentEvents | Where-Object {
         $_.Log -match '(?i)security' -or $_.Message -match '(?i)security|unauthorized|authentication'
     })
-    $securityEvidence = @((Get-ObjectProperty $Data 'SecurityDashboard' @())) + $securityEvents
+    $securityDashboard = @((Get-ObjectProperty $Data 'SecurityDashboard' @()))
+    $securityEvidence = $securityDashboard + $securityEvents
     $powerThermal = @($Data.Temperatures) + @($Data.Fans) + @($Data.PowerSupplies)
     $performance = @($Data.Memory) + @($Data.Processors)
 
@@ -762,11 +879,11 @@ function New-AssessmentSummary {
         [PSCustomObject]@{ Section = 'Remote Console & Media'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'Power & Thermal'; Status = Get-AssessmentStatus $powerThermal }
         [PSCustomObject]@{ Section = 'Performance'; Status = Get-AssessmentStatus $performance }
-        [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = 'RECOMMENDED' }
-        [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = 'RECOMMENDED' }
+        [PSCustomObject]@{ Section = 'iLO Dedicated Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloDedicatedNetworkPort' @())) }
+        [PSCustomObject]@{ Section = 'iLO Shared Network Port'; Status = Get-IloNetworkPortAssessmentStatus @((Get-ObjectProperty $Data 'IloSharedNetworkPort' @())) }
         [PSCustomObject]@{ Section = 'Remote Support'; Status = 'RECOMMENDED' }
         [PSCustomObject]@{ Section = 'Administration'; Status = Get-AssessmentStatus $criticalRecentEvents }
-        [PSCustomObject]@{ Section = 'Security'; Status = Get-AssessmentStatus $securityEvidence }
+        [PSCustomObject]@{ Section = 'Security'; Status = if ($securityEvents.Count -gt 0) { Get-AssessmentStatus $securityEvidence } else { Get-SecurityAssessmentStatus $securityDashboard } }
         [PSCustomObject]@{ Section = 'Management'; Status = Get-AssessmentStatus @($Data.Management) }
         [PSCustomObject]@{ Section = 'Lifecycle Management'; Status = Get-AssessmentStatus @($Data.Firmware) }
     )
@@ -779,15 +896,8 @@ function Get-RecommendedActionText {
     )
 
     $actions = [Collections.Generic.List[string]]::new()
-    $securityDashboard = @(Get-ObjectProperty -InputObject $Data -Name 'SecurityDashboard' -Default @())
-    foreach ($finding in $securityDashboard) {
-        $ignored = [bool](Get-ObjectProperty -InputObject $finding -Name 'Ignored' -Default $false)
-        $status = [string](Get-ObjectProperty -InputObject $finding -Name 'Security status' -Default '')
-        if ($ignored -or $status -notmatch '(?i)risk|critical|warning') { continue }
-        $recommendation = [string](Get-ObjectProperty -InputObject $finding -Name 'Recommended action' -Default '')
-        if ($recommendation -and -not $actions.Contains($recommendation)) {
-            $actions.Add($recommendation)
-        }
+    if (@($Assessment | Where-Object { $_.Section -eq 'Security' -and $_.Status -eq 'CRITICAL' }).Count -gt 0) {
+        $actions.Add('Review the iLO Security Dashboard and remediate all active security risks.')
     }
     if (@(Get-CriticalRecentEventLogs $Data).Count -gt 0) {
         $actions.Add('Investigate and resolve the critical iLO event-log entries recorded during the previous month.')
@@ -1284,6 +1394,8 @@ function New-OpenXmlHealthReport {
         @('Memory', 'Memory'),
         @('Processors', 'Processors'),
         @('Firmware & OS Software', 'Firmware'),
+        @('iLO Dedicated Network Port', 'IloDedicatedNetworkPort'),
+        @('iLO Shared Network Port', 'IloSharedNetworkPort'),
         @('Management', 'Management'),
         @('Security Dashboard', 'SecurityDashboard'),
         @('Administration - Event Logs', 'EventLogs')
@@ -1449,6 +1561,8 @@ function New-WordHealthReport {
             @('Memory', 'Memory'),
             @('Processors', 'Processors'),
             @('Firmware & OS Software', 'Firmware'),
+            @('iLO Dedicated Network Port', 'IloDedicatedNetworkPort'),
+            @('iLO Shared Network Port', 'IloSharedNetworkPort'),
             @('Management', 'Management'),
             @('Security Dashboard', 'SecurityDashboard'),
             @('Administration - Event Logs', 'EventLogs')
