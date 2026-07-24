@@ -206,6 +206,15 @@ Assert-Equal $percentFan.Reading '23%' 'Percent fan reading should include the p
 if ($percentFan.PSObject.Properties.Name -contains 'Units') {
     throw 'Fan report output should not contain Units.'
 }
+$processorRecord = Convert-Processor ([PSCustomObject]@{
+    Socket = 'CPU 1'
+    Model = 'Example Processor'
+    InstructionSet = 'x86-64'
+    Status = [PSCustomObject]@{ Health = 'OK' }
+})
+if ($processorRecord.PSObject.Properties.Name -contains 'Instruction set') {
+    throw 'Processor report output should not contain Instruction set.'
+}
 $notApplicableRowData = [PSCustomObject]@{
     Memory = @(
         [PSCustomObject][ordered]@{ Name = 'DIMM 1'; 'Capacity (MiB)' = 16384; Type = 'DDR4'; 'Speed (MHz)' = 2400; Health = 'OK' },
@@ -545,6 +554,9 @@ try {
             if ($documentText -match [regex]::Escape($unexpectedText)) {
                 throw "Native DOCX contains text that should have been omitted: $unexpectedText."
             }
+        }
+        if ($documentText -match '>OK<') {
+            throw 'Native DOCX should display HEALTHY rather than OK for status values.'
         }
     }
     finally {

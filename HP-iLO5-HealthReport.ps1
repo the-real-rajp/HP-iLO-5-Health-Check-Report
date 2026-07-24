@@ -646,7 +646,6 @@ function Convert-Processor {
         'Cores' = Get-ObjectProperty $Item 'TotalCores' 'N/A'
         'Threads' = Get-ObjectProperty $Item 'TotalThreads' 'N/A'
         'Speed (MHz)' = Get-ObjectProperty $Item 'OperatingSpeedMHz' (Get-ObjectProperty $Item 'MaxSpeedMHz' 'Unknown')
-        'Instruction set' = Get-ObjectProperty $Item 'InstructionSet' 'Unknown'
         'Health' = Get-HealthValue $Item
     }
 }
@@ -1373,13 +1372,16 @@ function Add-WordTable {
         for ($column = 1; $column -le $properties.Count; $column++) {
             $name = $properties[$column - 1]
             $value = $Records[$row - 1].PSObject.Properties[$name].Value
+            $isStatus = $name -match '(?i)status|health|state|severity' -or
+                ($name -eq 'Value' -and [string](Get-ObjectProperty $Records[$row - 1] 'Item' '') -match '(?i)status|health|state|severity')
+            $displayValue = if ($isStatus) { Get-ReportStatusDisplayValue $value } else { $value }
             $cell = $table.Cell($row + 1, $column)
-            $cell.Range.Text = [string]$value
+            $cell.Range.Text = [string]$displayValue
             $cell.Range.Font.Name = 'Aptos'
             $cell.Range.Font.Size = 9
             $statusColumns = @('Health', 'Status', 'Status / Severity', 'Severity', 'State', 'Security status', 'SecurityStatus', 'Registration')
-            $cell.Range.Font.Bold = if ($name -in $statusColumns) { -1 } else { 0 }
-            $cell.Range.Font.Color = if ($name -in $statusColumns) { Get-StatusColor $value } else { ConvertTo-WordColor '222222' }
+            $cell.Range.Font.Bold = if ($isStatus -or $name -in $statusColumns) { -1 } else { 0 }
+            $cell.Range.Font.Color = if ($isStatus -or $name -in $statusColumns) { Get-StatusColor $displayValue } else { ConvertTo-WordColor '222222' }
             if ($row % 2 -eq 0) { $cell.Shading.BackgroundPatternColor = ConvertTo-WordColor $script:ReportStripe }
             $cell.VerticalAlignment = 1
         }
@@ -1605,6 +1607,13 @@ function Get-OpenXmlStatusColor {
     }
 }
 
+function Get-ReportStatusDisplayValue {
+    param([AllowNull()][object]$Value)
+
+    if ([string]$Value -match '(?i)^ok$') { return 'HEALTHY' }
+    return $Value
+}
+
 function New-OpenXmlCell {
     param(
         [AllowNull()][object]$Value,
@@ -1680,10 +1689,14 @@ function New-OpenXmlTable {
         $cells = for ($columnIndex = 0; $columnIndex -lt $Columns.Count; $columnIndex++) {
             $column = $Columns[$columnIndex]
             $value = $Rows[$rowIndex].$column
-            $isStatus = $StatusColumns -and ($column -match '(?i)status|health|state|severity')
+            $isStatus = $StatusColumns -and (
+                $column -match '(?i)status|health|state|severity' -or
+                ($column -eq 'Value' -and [string](Get-ObjectProperty $Rows[$rowIndex] 'Item' '') -match '(?i)status|health|state|severity')
+            )
+            $displayValue = if ($isStatus) { Get-ReportStatusDisplayValue $value } else { $value }
             $alignment = if ($isStatus) { 'center' } else { 'left' }
-            $color = if ($isStatus) { Get-OpenXmlStatusColor $value } else { '222222' }
-            New-OpenXmlCell -Value $value -Width $Widths[$columnIndex] -Fill $fill -Color $color -Bold:$isStatus -Alignment $alignment
+            $color = if ($isStatus) { Get-OpenXmlStatusColor $displayValue } else { '222222' }
+            New-OpenXmlCell -Value $displayValue -Width $Widths[$columnIndex] -Fill $fill -Color $color -Bold:$isStatus -Alignment $alignment
         }
         $tableRows += '<w:tr>' + ($cells -join '') + '</w:tr>'
     }
@@ -1776,9 +1789,11 @@ function New-OpenXmlHealthReport {
     [void]$body.Add((New-OpenXmlParagraph -Text "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." -After 160 -Size 10.5))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Health Check Status/Severity' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlTable -Rows $healthCheckStatusGuidance -Columns @('Status / Severity', 'Guidance') -Widths @(3000, 7800) -StatusColumns))
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 0 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 160 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 0 -After 100 -Bold -Color '005F9E' -Size 13 -KeepNext))
     $assessmentRowCount = [Math]::Max(1, [Math]::Ceiling($assessment.Count / 2.0))
     $assessmentRows = for ($index = 0; $index -lt $assessmentRowCount; $index++) {
         $leftIndex = $index * 2
@@ -2011,8 +2026,10 @@ function New-WordHealthReport {
         $healthCheckStatusGuidance = @(Get-HealthCheckStatusGuidance)
         Add-WordHeading $document 'Health Check Status/Severity' 2
         Add-WordTable $document $healthCheckStatusGuidance 'No status guidance is available.'
+        Add-WordParagraph $document '' 11 $false '222222' 0
         Add-WordHeading $document 'Recommended Action' 2
         Add-WordParagraph $document $recommendedAction 11 $false '222222' 6
+        Add-WordParagraph $document '' 11 $false '222222' 0
         Add-WordHeading $document 'Assessment Summary' 2
         Add-AssessmentSummaryTable $document $assessment
 
