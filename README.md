@@ -91,10 +91,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The script prompts for an iLO IP address or FQDN, customer name, and then
 displays the standard Windows credential prompt. The password is not echoed or
-saved in the report.
+saved in the report or the log. During the run, the console shows connection,
+collection, and report-generation progress.
 When `-OutputPath` is omitted, the report is saved in the same folder as
 `HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory. Its
 default filename is `iLO Health Check - Customer Name - IP-or-FQDN.docx`.
+A detailed log is written for every run. By default it is saved in the script's
+`logs` folder as `iLO Health Check - Customer Name - IP-or-FQDN -
+YYYYMMDD-HHMMSS.log` and records progress, collection notes, Redfish request
+activity, and errors without recording credentials or session tokens.
 
 Parameters can also be supplied directly:
 
@@ -117,6 +122,7 @@ Certificate verification remains enabled by default. Other options:
 -Credential            PSCredential to use instead of prompting
 -CustomerName          Customer name displayed in the cover, header, and overview;
                        prompted when omitted
+-LogPath               Detailed log-file path; defaults to the timestamped logs folder
 -TimeoutSec             Per-request timeout; default 30
 -MaxLogEntries          Maximum entries collected from each log; default 100
 -SkipCertificateCheck   Disable TLS validation for a trusted lab only

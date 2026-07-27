@@ -20,6 +20,8 @@ param(
 
     [string]$OutputPath,
 
+    [string]$LogPath,
+
     [ValidateRange(1, 3600)]
     [int]$TimeoutSec = 30,
 
@@ -43,6 +45,61 @@ $script:ReportDark = '404040'
 $script:ReportStripe = 'F2F7FB'
 $script:ReportLogoPath = Join-Path $PSScriptRoot 'assets\winslowtg-logo.png'
 $script:ReportLogoUrl = 'https://winslowtg.com/wp-content/uploads/2022/07/logo-winslowtg@2x.png'
+$script:ReportLogPath = $null
+
+function Get-DefaultReportLogPath {
+    param(
+        [Parameter(Mandatory)][string]$CustomerName,
+        [Parameter(Mandatory)][uri]$BaseUri,
+        [Parameter(Mandatory)][datetime]$StartedAt
+    )
+
+    $safeCustomerName = ($CustomerName.Trim() -replace '[\\/:*?"<>|]', '-')
+    $safeTarget = ($BaseUri.Host -replace '[^A-Za-z0-9.-]', '-')
+    $timestamp = $StartedAt.ToString('yyyyMMdd-HHmmss')
+    return Join-Path $PSScriptRoot "logs\iLO Health Check - $safeCustomerName - $safeTarget - $timestamp.log"
+}
+
+function Initialize-ReportLog {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $directory = Split-Path -Parent $resolved
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    [IO.File]::WriteAllText($resolved, "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [INFO] iLO Health Check log started.$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+    $script:ReportLogPath = $resolved
+    return $resolved
+}
+
+function Write-ReportLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARNING', 'ERROR', 'VERBOSE')][string]$Level = 'INFO'
+    )
+
+    $entry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
+    if ($script:ReportLogPath) {
+        try {
+            [IO.File]::AppendAllText($script:ReportLogPath, $entry + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        }
+        catch {
+            Write-Warning "Unable to write to the health-check log: $($_.Exception.Message)"
+        }
+    }
+    if ($Level -eq 'VERBOSE') { Write-Verbose $entry }
+}
+
+function Write-ReportProgress {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Cyan
+    )
+
+    Write-Host $Message -ForegroundColor $Color
+    Write-ReportLog -Message $Message
+}
 
 function Get-ObjectProperty {
     param(
@@ -209,11 +266,13 @@ function Invoke-RedfishGet {
 
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
+            Write-ReportLog -Level VERBOSE -Message "Redfish GET $($request.Uri) (attempt $attempt of 3)."
             return Invoke-RestMethod @request
         }
         catch {
             $transient = $_.Exception.Message -match '(?i)underlying connection was closed|unexpected error occurred on a send|connection reset|forcibly closed|temporarily unavailable|timed out'
             if (-not $transient -or $attempt -eq 3) { throw }
+            Write-ReportLog -Level WARNING -Message "Transient Redfish request failure for $($request.Uri); retrying. $($_.Exception.Message)"
             Start-Sleep -Milliseconds (250 * $attempt)
         }
     }
@@ -245,6 +304,7 @@ function Get-RedfishCollection {
         }
         $nextUri = Get-ObjectProperty -InputObject $collection -Name 'Members@odata.nextLink'
     }
+    Write-ReportLog -Level VERBOSE -Message "Collected $($items.Count) item(s) from Redfish collection $Uri."
     return $items.ToArray()
 }
 
@@ -255,6 +315,7 @@ function Add-CollectionNote {
     )
     if (-not $Notes.Contains($Message)) {
         $Notes.Add($Message)
+        Write-ReportLog -Level WARNING -Message $Message
     }
 }
 
@@ -767,6 +828,7 @@ function Get-IloHealthData {
     )
 
     $notes = [System.Collections.Generic.List[string]]::new()
+    Write-ReportProgress 'Discovering server and iLO resources...'
     $root = Invoke-RedfishGet -Session $Session -Uri '/redfish/v1/'
     $systems = @(Get-SafeCollectionFromUris `
         -Session $Session `
@@ -792,6 +854,7 @@ function Get-IloHealthData {
 
     $iloInformation = @($managers | ForEach-Object { Convert-IloInformation $_ })
     $computeOpsManagement = @($managers | ForEach-Object { Convert-ComputeOpsManagement $_ })
+    Write-ReportProgress 'Collecting iLO, remote support, and network configuration...'
     $remoteSupportRegistration = [Collections.Generic.List[object]]::new()
     foreach ($manager in $managers) {
         $managerUri = Get-ObjectProperty $manager '@odata.id'
@@ -845,6 +908,7 @@ function Get-IloHealthData {
     $temperatures = @()
     $fans = @()
     $powerSupplies = @()
+    Write-ReportProgress 'Collecting power and thermal health data...'
     if ($chassis.Count -gt 0) {
         $chassisItem = $chassis[0]
         $chassisUri = Get-ObjectProperty $chassisItem '@odata.id'
@@ -867,6 +931,7 @@ function Get-IloHealthData {
         catch { Add-CollectionNote $notes "Unable to collect power data: $($_.Exception.Message)" }
     }
 
+    Write-ReportProgress 'Collecting processors, memory, and host network data...'
     $memory = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Memory') $notes 'memory') |
         ForEach-Object { Convert-Memory $_ } |
         Where-Object { Test-ReportRecordPresent $_ })
@@ -892,6 +957,7 @@ function Get-IloHealthData {
             Convert-SystemNetworkInterface -Item $_ -Type $interfaceType
         })
 
+    Write-ReportProgress 'Collecting device inventory and storage data...'
     $deviceInventory = [System.Collections.Generic.List[object]]::new()
     $deviceUris = [System.Collections.Generic.List[string]]::new()
     foreach ($owner in $chassis) {
@@ -952,6 +1018,7 @@ function Get-IloHealthData {
         }
     }
 
+    Write-ReportProgress 'Collecting firmware inventory and event logs...'
     $firmware = @()
     try {
         $updateUri = Get-RedfishLink $root 'UpdateService'
@@ -987,6 +1054,7 @@ function Get-IloHealthData {
         }
     }
 
+    Write-ReportProgress 'Collecting Security Dashboard data...'
     $securityDashboard = [System.Collections.Generic.List[object]]::new()
     foreach ($manager in $managers) {
         $managerUri = Get-ObjectProperty $manager '@odata.id'
@@ -1020,6 +1088,11 @@ function Get-IloHealthData {
             -Label 'security dashboard parameters')) {
             $securityDashboard.Add((Convert-SecurityParameter $parameter))
         }
+    }
+
+    Write-ReportLog -Message "Collection complete: $($processors.Count) processor(s), $($memory.Count) memory module(s), $($storage.Count) storage record(s), $($eventLogs.Count) log entry or entries, and $($securityDashboard.Count) security record(s)."
+    if ($notes.Count -gt 0) {
+        Write-ReportLog -Level WARNING -Message "Collection completed with $($notes.Count) note(s)."
     }
 
     [PSCustomObject][ordered]@{
@@ -2148,6 +2221,7 @@ function Invoke-IloHealthReport {
         [PSCredential]$Credential,
         [string]$CustomerName,
         [string]$OutputPath,
+        [string]$LogPath,
         [int]$TimeoutSec = 30,
         [int]$MaxLogEntries = 100,
         [switch]$SkipCertificateCheck
@@ -2170,6 +2244,10 @@ function Invoke-IloHealthReport {
         $safeTarget = ($baseUri.Host -replace '[^A-Za-z0-9.-]', '-')
         $OutputPath = Join-Path $PSScriptRoot "iLO Health Check - $safeCustomerName - $safeTarget.docx"
     }
+    if (-not $LogPath) {
+        $LogPath = Get-DefaultReportLogPath -CustomerName $CustomerName -BaseUri $baseUri -StartedAt (Get-Date)
+    }
+    $resolvedLogPath = Initialize-ReportLog -Path $LogPath
 
     $session = $null
     $previousCertificateCallback = $null
@@ -2177,6 +2255,9 @@ function Invoke-IloHealthReport {
     $previousSecurityProtocol = $null
     $securityProtocolChanged = $false
     try {
+        Write-ReportProgress 'Starting iLO Health Check...'
+        Write-ReportProgress "Detailed log: $resolvedLogPath" -Color DarkGray
+        Write-ReportLog -Message "Target: $($baseUri.AbsoluteUri.TrimEnd('/')); customer: $CustomerName; timeout: $TimeoutSec second(s); event-log limit: $MaxLogEntries."
         if ($PSVersionTable.PSVersion.Major -lt 7) {
             $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
             [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -2187,24 +2268,36 @@ function Invoke-IloHealthReport {
                 $certificateCallbackChanged = $true
             }
         }
-        Write-Host "Connecting to $($baseUri.AbsoluteUri.TrimEnd('/')) ..."
+        Write-ReportProgress "Connecting to $($baseUri.AbsoluteUri.TrimEnd('/')) ..."
         $session = New-IloSession `
             -BaseUri $baseUri `
             -Credential $Credential `
             -TimeoutSec $TimeoutSec `
             -IgnoreCertificateErrors ([bool]$SkipCertificateCheck)
+        Write-ReportProgress 'Connected. Redfish session authenticated.' -Color Green
         $data = Get-IloHealthData $session $MaxLogEntries
+        Write-ReportProgress 'Creating Word health report...'
         $reportPath = New-WordHealthReport -Data $data -OutputPath $OutputPath -CustomerName $CustomerName
-        Write-Host "Word report created: $reportPath" -ForegroundColor Green
+        Write-ReportProgress "Word report created: $reportPath" -Color Green
+        Write-ReportLog -Message "Health check completed successfully. Report: $reportPath"
+    }
+    catch {
+        Write-ReportLog -Level ERROR -Message "Health check failed: $($_.Exception.Message)"
+        Write-Host "Health check failed. See the detailed log: $resolvedLogPath" -ForegroundColor Red
+        throw
     }
     finally {
-        if ($null -ne $session) { Remove-IloSession $session }
+        if ($null -ne $session) {
+            Write-ReportLog -Level VERBOSE -Message 'Closing Redfish session.'
+            Remove-IloSession $session
+        }
         if ($certificateCallbackChanged) {
             [Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
         }
         if ($securityProtocolChanged) {
             [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
         }
+        Write-ReportLog -Level VERBOSE -Message 'iLO Health Check cleanup completed.'
     }
 }
 

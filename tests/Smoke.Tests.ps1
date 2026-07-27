@@ -629,17 +629,26 @@ function New-WordHealthReport {
     return $OutputPath
 }
 function Remove-IloSession { param($Session) }
+$smokeLogPath = $null
 try {
     $password = ConvertTo-SecureString 'smoke-test-only' -AsPlainText -Force
     $credential = [PSCredential]::new('test-user', $password)
+    $smokeLogPath = Join-Path ([IO.Path]::GetTempPath()) 'HP-iLO5-HealthReport-smoke.log'
+    if (Test-Path -LiteralPath $smokeLogPath) { Remove-Item -LiteralPath $smokeLogPath -Force }
     Invoke-IloHealthReport `
         -IloAddress '192.0.2.10' `
         -Credential $credential `
         -CustomerName 'Example Customer' `
         -OutputPath 'smoke-test.docx' `
+        -LogPath $smokeLogPath `
         -SkipCertificateCheck
     Assert-Equal $script:ignoreCertificateErrorsObserved $true 'Certificate-skip forwarding failed'
     Assert-Equal $script:customerNameObserved 'Example Customer' 'Customer name forwarding failed'
+    if (-not (Test-Path -LiteralPath $smokeLogPath)) { throw 'Health-check log was not created.' }
+    $smokeLog = Get-Content -LiteralPath $smokeLogPath -Raw
+    if ($smokeLog -notmatch 'Health check completed successfully') { throw 'Health-check log did not record successful completion.' }
+    if ($smokeLog -match 'smoke-test-only') { throw 'Health-check log must not contain the credential password.' }
+    Remove-Item -LiteralPath $smokeLogPath -Force
 
     function Read-Host {
         param([string]$Prompt)
@@ -649,7 +658,8 @@ try {
     try {
         Invoke-IloHealthReport `
             -IloAddress '192.0.2.10' `
-            -Credential $credential
+            -Credential $credential `
+            -LogPath $smokeLogPath
     }
     finally {
         Remove-Item function:Read-Host -Force
@@ -659,8 +669,17 @@ try {
     if ((Split-Path -Leaf $script:outputPathObserved) -ne 'iLO Health Check - Prompted Customer - 192.0.2.10.docx') {
         throw "Default report filename is incorrect: $script:outputPathObserved"
     }
+
+    $defaultLogPath = Get-DefaultReportLogPath -CustomerName 'Prompted Customer' -BaseUri ([uri]'https://192.0.2.10') -StartedAt ([datetime]'2026-07-27T14:30:45')
+    if ((Split-Path -Leaf $defaultLogPath) -ne 'iLO Health Check - Prompted Customer - 192.0.2.10 - 20260727-143045.log') {
+        throw "Default log filename is incorrect: $defaultLogPath"
+    }
+    if ((Split-Path -Leaf (Split-Path -Parent $defaultLogPath)) -ne 'logs') {
+        throw "Default log path must use the logs folder: $defaultLogPath"
+    }
 }
 finally {
+    if ($smokeLogPath -and (Test-Path -LiteralPath $smokeLogPath)) { Remove-Item -LiteralPath $smokeLogPath -Force }
     Set-Item function:New-IloSession $originalNewSession
     Set-Item function:Get-IloHealthData $originalGetHealthData
     Set-Item function:New-WordHealthReport $originalNewReport
