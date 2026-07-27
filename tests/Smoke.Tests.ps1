@@ -1,11 +1,19 @@
 $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'HP-iLO5-HealthReport.ps1'
+$sampleGeneratorPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\Generate-SampleReport.ps1'
 
 $tokens = $null
 $errors = $null
 [void][Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) {
     throw "PowerShell parser errors: $($errors.Message -join '; ')"
+}
+
+$sampleTokens = $null
+$sampleErrors = $null
+[void][Management.Automation.Language.Parser]::ParseFile($sampleGeneratorPath, [ref]$sampleTokens, [ref]$sampleErrors)
+if ($sampleErrors.Count -gt 0) {
+    throw "Sample report generator parser errors: $($sampleErrors.Message -join '; ')"
 }
 
 . $scriptPath
@@ -568,6 +576,39 @@ finally {
     Remove-Item $nativeReportPath -Force -ErrorAction SilentlyContinue
 }
 
+$sampleReportPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\sample-health-report.docx'
+if (-not (Test-Path -LiteralPath $sampleReportPath)) {
+    throw 'The checked-in sample report is missing.'
+}
+$zip = [IO.Compression.ZipFile]::OpenRead($sampleReportPath)
+try {
+    $documentEntry = $zip.GetEntry('word/document.xml')
+    $reader = New-Object IO.StreamReader($documentEntry.Open())
+    try { $sampleDocumentText = $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+    foreach ($expectedText in @(
+        'HP iLO Health Check',
+        'Health Check Status/Severity',
+        'Recommended Action',
+        'Assessment Summary',
+        'iLO Dedicated Network Port',
+        'HEALTHY',
+        'Embedded LOM 1'
+    )) {
+        if ($sampleDocumentText -notmatch [regex]::Escape($expectedText)) {
+            throw "Sample report is missing expected text: $expectedText."
+        }
+    }
+    foreach ($unexpectedText in @('Instruction set', '>OK<')) {
+        if ($sampleDocumentText -match [regex]::Escape($unexpectedText)) {
+            throw "Sample report contains text that should be omitted: $unexpectedText."
+        }
+    }
+}
+finally {
+    $zip.Dispose()
+}
+
 $originalRedfishGet = ${function:Invoke-RedfishGet}
 $script:fakeResponses = @{
     '/empty-collection' = [PSCustomObject]@{ Members = @() }
@@ -676,6 +717,12 @@ try {
     }
     if ((Split-Path -Leaf (Split-Path -Parent $defaultLogPath)) -ne 'logs') {
         throw "Default log path must use the logs folder: $defaultLogPath"
+    }
+
+    Write-ReportProgress -Message 'System' -Indent 1 6>$null
+    $smokeLog = Get-Content -LiteralPath $smokeLogPath -Raw
+    if ($smokeLog -notmatch [regex]::Escape('  - System')) {
+        throw 'Indented collection progress was not written to the detailed log.'
     }
 }
 finally {

@@ -1,7 +1,7 @@
 # HP iLO 5 Health Check Report
 
 Generate a Word-compatible health report for an HPE iLO 5 server with
-PowerShell and the Redfish API. Microsoft Word is optional.
+PowerShell 7 and the Redfish API. Microsoft Word is optional.
 
 The report covers:
 
@@ -65,7 +65,7 @@ manager identifier.
 ## Requirements
 
 - Windows 10, Windows 11, or Windows Server
-- PowerShell 7 or later
+- PowerShell 7.0 or later
 - Desktop Microsoft Word is optional. The script uses its built-in Open XML
   generator by default for consistent branded output; set
   `HP_ILO_USE_WORD_COM=1` only to opt into the legacy Word automation path.
@@ -78,21 +78,36 @@ No extra PowerShell modules are required.
 
 The current report layout and table filtering are illustrated in
 [examples/sample-health-report.docx](examples/sample-health-report.docx).
-The sample uses placeholder infrastructure data only.
+It uses placeholder infrastructure data only and can be regenerated with
+`examples/Generate-SampleReport.ps1`.
 
 ## Run
 
-Open PowerShell in the repository directory:
+Open PowerShell 7 in the repository directory:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-./HP-iLO5-HealthReport.ps1
+pwsh -NoProfile -File ./HP-iLO5-HealthReport.ps1
 ```
 
 The script prompts for an iLO IP address or FQDN, customer name, and then
 displays the standard Windows credential prompt. The password is not echoed or
 saved in the report or the log. During the run, the console shows connection,
-collection, and report-generation progress.
+collection, and report-generation progress. Collection activity is grouped so
+you can see the area being queried and its current step, for example:
+
+```text
+Collecting iLO
+  - System
+  - Chassis
+  - Managers
+Collecting Network Configuration
+  - iLO Ethernet interfaces
+Collecting System Information
+  - Memory
+  - Processors
+```
+
 When `-OutputPath` is omitted, the report is saved in the same folder as
 `HP-iLO5-HealthReport.ps1`, regardless of PowerShell's current directory. Its
 default filename is `iLO Health Check - Customer Name - IP-or-FQDN.docx`.
@@ -104,7 +119,7 @@ activity, and errors without recording credentials or session tokens.
 Parameters can also be supplied directly:
 
 ```powershell
-./HP-iLO5-HealthReport.ps1 `
+pwsh -NoProfile -File ./HP-iLO5-HealthReport.ps1 `
     -IloAddress 'ilo.example.com' `
     -CustomerName 'Example Customer' `
     -OutputPath '.\reports\server-01-health.docx'
@@ -113,7 +128,7 @@ Parameters can also be supplied directly:
 For an iLO with a self-signed certificate in a trusted lab:
 
 ```powershell
-./HP-iLO5-HealthReport.ps1 -IloAddress '192.0.2.10' -SkipCertificateCheck
+pwsh -NoProfile -File ./HP-iLO5-HealthReport.ps1 -IloAddress '192.0.2.10' -SkipCertificateCheck
 ```
 
 Certificate verification remains enabled by default. Other options:
@@ -144,8 +159,14 @@ Run the smoke tests with PowerShell:
 pwsh -NoProfile -File ./tests/Smoke.Tests.ps1
 ```
 
-The smoke tests validate script parsing, pure data-shaping helpers, and the
-built-in DOCX package without contacting an iLO or starting Microsoft Word.
+The smoke tests validate script parsing, report data shaping, timestamped log
+creation, grouped progress formatting, and the built-in DOCX package without
+contacting an iLO or starting Microsoft Word.
+
+## Maintainer guide
+
+See [AGENT.md](AGENT.md) for the project conventions, validation steps, and
+reporting rules used when modifying this repository.
 
 ## References
 
