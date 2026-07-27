@@ -201,6 +201,10 @@ function New-IloSession {
     }
     else {
         $request.UseBasicParsing = $true
+        # Some iLO 5 firmware versions close reused .NET Framework HTTP
+        # connections during longer Redfish collections. Open a fresh
+        # connection for each request when running in Windows PowerShell 5.1.
+        $request.DisableKeepAlive = $true
     }
     $response = Invoke-WebRequest @request
     # PowerShell 7 returns header values as String[]. Passing that array back
@@ -235,6 +239,7 @@ function Remove-IloSession {
         }
         else {
             $request.UseBasicParsing = $true
+            $request.DisableKeepAlive = $true
         }
         Invoke-WebRequest @request | Out-Null
     }
@@ -262,6 +267,10 @@ function Invoke-RedfishGet {
     }
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         $request.SkipCertificateCheck = [bool]$Session.IgnoreCertificateErrors
+    }
+    else {
+        $request.UseBasicParsing = $true
+        $request.DisableKeepAlive = $true
     }
 
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -2259,6 +2268,7 @@ function Invoke-IloHealthReport {
         Write-ReportProgress "Detailed log: $resolvedLogPath" -Color DarkGray
         Write-ReportLog -Message "Target: $($baseUri.AbsoluteUri.TrimEnd('/')); customer: $CustomerName; timeout: $TimeoutSec second(s); event-log limit: $MaxLogEntries."
         if ($PSVersionTable.PSVersion.Major -lt 7) {
+            Write-ReportLog -Message 'Windows PowerShell 5.1 compatibility mode is using a separate HTTP connection for each Redfish request.'
             $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
             [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             $securityProtocolChanged = $true

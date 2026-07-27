@@ -74,6 +74,10 @@ manager identifier.
 
 No extra PowerShell modules are required.
 
+When running on Windows PowerShell 5.1, the script automatically uses a fresh
+HTTP connection for each Redfish request. This avoids connection drops observed
+with some iLO 5 firmware during larger hardware collections.
+
 ## Example report
 
 The current report layout and table filtering are illustrated in
