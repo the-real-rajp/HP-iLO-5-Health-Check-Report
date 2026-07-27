@@ -51,9 +51,9 @@ The report covers:
 - Remote Support is `HEALTHY` when registered, `RECOMMENDED` when explicitly
   unregistered or reporting a transmission error, and omitted when its
   registration is unknown.
-- An `Ignored` Overall Security Status is treated as healthy. Individual
-  Security Dashboard findings with `Ignore = True` do not lower the assessment
-  and do not add a separate Ignored column.
+- An `Ignored` Overall Security Status or individual Security Dashboard finding
+  is assessed as `WARNING`; a Security Status of `Risk` is assessed as
+  `CRITICAL`. Ignored findings do not add a separate Ignored column.
 - HPE Compute Ops Management uses iLO's HPE `CloudConnect` status and never
   exposes the GreenLake activation key. It is optional: `NotEnabled` remains
   visible in Information but does not make that assessment `RECOMMENDED`.

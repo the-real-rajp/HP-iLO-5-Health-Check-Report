@@ -1128,20 +1128,24 @@ function Get-CriticalRecentEventLogs {
 function Get-SecurityAssessmentStatus {
     param([AllowEmptyCollection()][object[]]$Items)
 
-    $overallStatus = @($Items | Where-Object {
-        [string](Get-ObjectProperty -InputObject $_ -Name 'Name' -Default '') -eq 'Overall Security Status'
-    } | Select-Object -First 1)
-    if ($overallStatus.Count -gt 0 -and
-        [string](Get-ObjectProperty -InputObject $overallStatus[0] -Name 'Security status' -Default '') -match '(?i)^ignored$') {
-        return 'HEALTHY'
-    }
-    $activeItems = @($Items | Where-Object {
-        $ignored = [bool](Get-ObjectProperty -InputObject $_ -Name 'Ignored' -Default $false)
-        $status = [string](Get-ObjectProperty -InputObject $_ -Name 'Security status' -Default '')
-        -not $ignored -and $status -notmatch '(?i)^ignored$'
-    })
-    if ($activeItems.Count -eq 0 -and @($Items).Count -gt 0) { return 'HEALTHY' }
-    return Get-AssessmentStatus $activeItems
+    if (@($Items).Count -eq 0) { return $null }
+
+    $statuses = @(
+        $Items | ForEach-Object {
+            [string](Get-ObjectProperty -InputObject $_ -Name 'Security status' -Default '')
+        } | Where-Object {
+            $_ -notmatch '(?i)^\s*(unknown|absent)?\s*$'
+        }
+    )
+    if ($statuses.Count -eq 0) { return $null }
+
+    # A risk has the highest severity, even when another dashboard finding is
+    # ignored. Ignored overall or individual security findings remain visible
+    # as warnings so the assessment calls attention to the exception.
+    if ($statuses -match '(?i)^risk$') { return 'CRITICAL' }
+    if ($statuses -match '(?i)^ignored$') { return 'WARNING' }
+
+    return Get-AssessmentStatus $Items
 }
 
 function Get-IloNetworkPortAssessmentStatus {
@@ -1251,8 +1255,8 @@ function Get-RecommendedActionText {
     if ($otherCritical.Count -gt 0) {
         $actions.Add("Review and remediate the critical findings in: $($otherCritical -join ', ').")
     }
-    if (@($Assessment | Where-Object Status -eq 'RECOMMENDED').Count -gt 0) {
-        $actions.Add('Review the sections marked RECOMMENDED in the Assessment Summary and validate unavailable or uncollected configuration areas.')
+    if (@($Assessment | Where-Object { $_.Status -in @('WARNING', 'RECOMMENDED') }).Count -gt 0) {
+        $actions.Add('Review the sections marked WARNING or RECOMMENDED in the Assessment Summary and validate unavailable or uncollected configuration areas.')
     }
     if ($actions.Count -eq 0) {
         $actions.Add('No immediate corrective action is required. Continue routine monitoring and periodic health checks.')
@@ -1600,7 +1604,7 @@ function Get-OpenXmlStatusColor {
 
     switch -Regex ([string]$Status) {
         '^(CRITICAL|Critical|Failed|Fatal|Risk)$' { return 'C00000' }
-        '^(RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
+        '^(WARNING|RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
         '^(HEALTHY|OK|Ok|Enabled|Connected)$' { return '00843D' }
         '^(INFO|Info)$' { return '4F81BD' }
         default { return '666666' }

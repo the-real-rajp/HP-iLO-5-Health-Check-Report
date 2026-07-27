@@ -75,12 +75,13 @@ $ignoredSecurityParameter = Convert-SecurityParameter ([PSCustomObject]@{
     Ignore = $true
 })
 Assert-Equal $ignoredSecurityParameter.'Security status' 'Ignored' 'An ignored Security Dashboard item should display Ignored'
-Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityParameter)) 'HEALTHY' 'An ignored Security Dashboard item should not reduce section health'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityParameter)) 'WARNING' 'An ignored Security Dashboard item should produce a warning'
 $ignoredSecurityOverview = Convert-SecurityDashboardOverview ([PSCustomObject]@{
     OverallSecurityStatus = 'Ignored'
     ServerConfigurationLockStatus = 'Disabled'
 })
-Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview, $securityParameter)) 'HEALTHY' 'Ignored Overall Security Status should mark Security healthy'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview)) 'WARNING' 'Ignored Overall Security Status should produce a warning'
+Assert-Equal (Get-SecurityAssessmentStatus @($ignoredSecurityOverview, $securityParameter)) 'CRITICAL' 'A Security Dashboard risk must remain critical when the overall status is ignored'
 
 $firmwareRecord = Convert-Firmware ([PSCustomObject]@{
     Name = 'iLO 5'
