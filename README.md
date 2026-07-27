@@ -65,7 +65,7 @@ manager identifier.
 ## Requirements
 
 - Windows 10, Windows 11, or Windows Server
-- Windows PowerShell 5.1 or PowerShell 7
+- PowerShell 7 or later
 - Desktop Microsoft Word is optional. The script uses its built-in Open XML
   generator by default for consistent branded output; set
   `HP_ILO_USE_WORD_COM=1` only to opt into the legacy Word automation path.
@@ -73,10 +73,6 @@ manager identifier.
 - An iLO account with read access to the requested Redfish resources
 
 No extra PowerShell modules are required.
-
-When running on Windows PowerShell 5.1, the script automatically uses a fresh
-HTTP connection for each Redfish request. This avoids connection drops observed
-with some iLO 5 firmware during larger hardware collections.
 
 ## Example report
 
