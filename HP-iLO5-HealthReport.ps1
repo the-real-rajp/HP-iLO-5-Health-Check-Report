@@ -94,11 +94,13 @@ function Write-ReportLog {
 function Write-ReportProgress {
     param(
         [Parameter(Mandatory)][string]$Message,
-        [ConsoleColor]$Color = [ConsoleColor]::Cyan
+        [ConsoleColor]$Color = [ConsoleColor]::Cyan,
+        [ValidateRange(0, 8)][int]$Indent = 0
     )
 
-    Write-Host $Message -ForegroundColor $Color
-    Write-ReportLog -Message $Message
+    $displayMessage = if ($Indent -gt 0) { (('  ' * $Indent) + '- ' + $Message) } else { $Message }
+    Write-Host $displayMessage -ForegroundColor $Color
+    Write-ReportLog -Message $displayMessage
 }
 
 function Get-ObjectProperty {
@@ -837,8 +839,10 @@ function Get-IloHealthData {
     )
 
     $notes = [System.Collections.Generic.List[string]]::new()
-    Write-ReportProgress 'Discovering server and iLO resources...'
+    Write-ReportProgress 'Collecting iLO'
+    Write-ReportProgress 'Service root' -Indent 1
     $root = Invoke-RedfishGet -Session $Session -Uri '/redfish/v1/'
+    Write-ReportProgress 'System' -Indent 1
     $systems = @(Get-SafeCollectionFromUris `
         -Session $Session `
         -Uris @((Get-RedfishLink $root 'Systems'), '/redfish/v1/Systems/', '/redfish/v1/Systems') `
@@ -850,11 +854,13 @@ function Get-IloHealthData {
         throw "No ComputerSystem resource was found. $discoveryDetail"
     }
     $system = $systems[0]
+    Write-ReportProgress 'Chassis' -Indent 1
     $chassis = @(Get-SafeCollectionFromUris `
         -Session $Session `
         -Uris @((Get-RedfishLink $root 'Chassis'), '/redfish/v1/Chassis/', '/redfish/v1/Chassis') `
         -Notes $notes `
         -Label 'chassis')
+    Write-ReportProgress 'Managers' -Indent 1
     $managers = @(Get-SafeCollectionFromUris `
         -Session $Session `
         -Uris @((Get-RedfishLink $root 'Managers'), '/redfish/v1/Managers/', '/redfish/v1/Managers') `
@@ -863,7 +869,8 @@ function Get-IloHealthData {
 
     $iloInformation = @($managers | ForEach-Object { Convert-IloInformation $_ })
     $computeOpsManagement = @($managers | ForEach-Object { Convert-ComputeOpsManagement $_ })
-    Write-ReportProgress 'Collecting iLO, remote support, and network configuration...'
+    Write-ReportProgress 'Collecting Remote Support'
+    Write-ReportProgress 'Registration' -Indent 1
     $remoteSupportRegistration = [Collections.Generic.List[object]]::new()
     foreach ($manager in $managers) {
         $managerUri = Get-ObjectProperty $manager '@odata.id'
@@ -897,6 +904,8 @@ function Get-IloHealthData {
 
     $iloDedicatedNetworkPort = @()
     $iloSharedNetworkPort = @()
+    Write-ReportProgress 'Collecting Network Configuration'
+    Write-ReportProgress 'iLO Ethernet interfaces' -Indent 1
     foreach ($manager in $managers) {
         $managerUri = Get-ObjectProperty $manager '@odata.id'
         $ethernetInterfacesUri = Get-RedfishLink $manager 'EthernetInterfaces'
@@ -917,7 +926,7 @@ function Get-IloHealthData {
     $temperatures = @()
     $fans = @()
     $powerSupplies = @()
-    Write-ReportProgress 'Collecting power and thermal health data...'
+    Write-ReportProgress 'Collecting Power & Thermal'
     if ($chassis.Count -gt 0) {
         $chassisItem = $chassis[0]
         $chassisUri = Get-ObjectProperty $chassisItem '@odata.id'
@@ -925,6 +934,7 @@ function Get-IloHealthData {
         $powerUri = Get-RedfishLink $chassisItem 'Power'
         if (-not $thermalUri -and $chassisUri) { $thermalUri = "$($chassisUri.TrimEnd('/'))/Thermal" }
         if (-not $powerUri -and $chassisUri) { $powerUri = "$($chassisUri.TrimEnd('/'))/Power" }
+        Write-ReportProgress 'Thermal sensors and fans' -Indent 1
         try {
             $thermal = Invoke-RedfishGet $Session $thermalUri
             $temperatures = @(@(Get-ObjectProperty $thermal 'Temperatures' @()) |
@@ -933,6 +943,7 @@ function Get-IloHealthData {
             $fans = @(@(Get-ObjectProperty $thermal 'Fans' @()) | ForEach-Object { Convert-Fan $_ })
         }
         catch { Add-CollectionNote $notes "Unable to collect thermal data: $($_.Exception.Message)" }
+        Write-ReportProgress 'Power supplies' -Indent 1
         try {
             $power = Invoke-RedfishGet $Session $powerUri
             $powerSupplies = @(@(Get-ObjectProperty $power 'PowerSupplies' @()) | ForEach-Object { Convert-PowerSupply $_ })
@@ -940,13 +951,16 @@ function Get-IloHealthData {
         catch { Add-CollectionNote $notes "Unable to collect power data: $($_.Exception.Message)" }
     }
 
-    Write-ReportProgress 'Collecting processors, memory, and host network data...'
+    Write-ReportProgress 'Collecting System Information'
+    Write-ReportProgress 'Memory' -Indent 1
     $memory = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Memory') $notes 'memory') |
         ForEach-Object { Convert-Memory $_ } |
         Where-Object { Test-ReportRecordPresent $_ })
+    Write-ReportProgress 'Processors' -Indent 1
     $processors = @((Get-SafeCollection $Session (Get-RedfishLink $system 'Processors') $notes 'processors') | ForEach-Object { Convert-Processor $_ })
 
     $systemNetwork = @()
+    Write-ReportProgress 'System Ethernet interfaces' -Indent 1
     $systemUri = Get-ObjectProperty $system '@odata.id'
     $ethernetInterfacesUri = Get-RedfishLink $system 'EthernetInterfaces'
     if (-not $ethernetInterfacesUri -and $systemUri) {
@@ -966,7 +980,7 @@ function Get-IloHealthData {
             Convert-SystemNetworkInterface -Item $_ -Type $interfaceType
         })
 
-    Write-ReportProgress 'Collecting device inventory and storage data...'
+    Write-ReportProgress 'Device inventory' -Indent 1
     $deviceInventory = [System.Collections.Generic.List[object]]::new()
     $deviceUris = [System.Collections.Generic.List[string]]::new()
     foreach ($owner in $chassis) {
@@ -992,6 +1006,7 @@ function Get-IloHealthData {
         }
     }
 
+    Write-ReportProgress 'Storage' -Indent 1
     $storage = [System.Collections.Generic.List[object]]::new()
     $standardStorageUri = if ($systemUri) { "$($systemUri.TrimEnd('/'))/Storage" } else { $null }
     $storageUris = @($standardStorageUri, (Get-RedfishLink $system 'Storage'))
@@ -1027,7 +1042,8 @@ function Get-IloHealthData {
         }
     }
 
-    Write-ReportProgress 'Collecting firmware inventory and event logs...'
+    Write-ReportProgress 'Collecting Firmware & OS Software'
+    Write-ReportProgress 'Firmware inventory' -Indent 1
     $firmware = @()
     try {
         $updateUri = Get-RedfishLink $root 'UpdateService'
@@ -1037,6 +1053,8 @@ function Get-IloHealthData {
     }
     catch { Add-CollectionNote $notes "Unable to collect firmware inventory: $($_.Exception.Message)" }
 
+    Write-ReportProgress 'Collecting Event Logs'
+    Write-ReportProgress 'Log services and entries' -Indent 1
     $eventLogs = [System.Collections.Generic.List[object]]::new()
     $logServiceUris = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($owner in @($system) + $managers) {
@@ -1063,7 +1081,8 @@ function Get-IloHealthData {
         }
     }
 
-    Write-ReportProgress 'Collecting Security Dashboard data...'
+    Write-ReportProgress 'Collecting Security Dashboard'
+    Write-ReportProgress 'Security service and parameters' -Indent 1
     $securityDashboard = [System.Collections.Generic.List[object]]::new()
     foreach ($manager in $managers) {
         $managerUri = Get-ObjectProperty $manager '@odata.id'
