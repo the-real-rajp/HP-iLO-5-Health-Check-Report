@@ -467,8 +467,9 @@ $nativeReportData = [PSCustomObject]@{
     CollectionNotes = @('Example report generated without Microsoft Word.')
 }
 $nativeReportPath = Join-Path ([IO.Path]::GetTempPath()) ('ilo-health-native-' + [guid]::NewGuid().ToString('N') + '.docx')
+$logoFallbackPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\winslowtg-logo.png'
 try {
-    $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer'
+    $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer' -LogoPath $logoFallbackPath
     Assert-Equal $createdReport $nativeReportPath 'Native DOCX generator returned the wrong path'
     if (-not (Test-Path $nativeReportPath)) { throw 'Native DOCX generator did not create a report.' }
     Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
@@ -497,6 +498,14 @@ try {
         $reader = New-Object IO.StreamReader($footerEntry.Open())
         try { $footerText = $reader.ReadToEnd() }
         finally { $reader.Dispose() }
+        $headerEntry = $zip.GetEntry('word/header1.xml')
+        $reader = [IO.StreamReader]::new($headerEntry.Open(), [Text.Encoding]::UTF8, $true)
+        try { $headerText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
+        $stylesEntry = $zip.GetEntry('word/styles.xml')
+        $reader = New-Object IO.StreamReader($stylesEntry.Open())
+        try { $stylesText = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
         foreach ($expectedFooterText in @(
             'Confidential',
             "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved",
@@ -504,6 +513,37 @@ try {
         )) {
             if ($footerText -notmatch [regex]::Escape($expectedFooterText)) {
                 throw "Native DOCX footer is missing expected text: $expectedFooterText."
+            }
+        }
+        foreach ($expectedLayoutText in @(
+            '<w:pgMar w:top="1080" w:right="720" w:bottom="720" w:left="720"',
+            '<w:tblLayout w:type="autofit"/>',
+            '<w:top w:w="60" w:type="dxa"/>',
+            '<w:bottom w:w="60" w:type="dxa"/>'
+        )) {
+            if ($documentText -notmatch [regex]::Escape($expectedLayoutText)) {
+                throw "Native DOCX is missing expected layout setting: $expectedLayoutText."
+            }
+        }
+        foreach ($expectedStyleText in @(
+            '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>',
+            '<w:style w:type="paragraph" w:styleId="Heading2"',
+            '<w:color w:val="404040"/>'
+        )) {
+            if ($stylesText -notmatch [regex]::Escape($expectedStyleText)) {
+                throw "Native DOCX styles are missing expected setting: $expectedStyleText."
+            }
+        }
+        $expectedHeaderText = "HP iLO Health Check $([char]0x2013) 192.0.2.10 $([char]0x2013) Example Customer"
+        foreach ($expectedHeaderValue in @(
+            $expectedHeaderText,
+            '<w:gridCol w:w="2300"/>',
+            '<w:gridCol w:w="8500"/>',
+            '<wp:extent cx="1333500" cy="409575"/>',
+            '<w:sz w:val="16"/>'
+        )) {
+            if ($headerText -notmatch [regex]::Escape($expectedHeaderValue)) {
+                throw "Native DOCX header is missing expected setting: $expectedHeaderValue."
             }
         }
         foreach ($expectedText in @(

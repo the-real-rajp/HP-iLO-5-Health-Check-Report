@@ -30,13 +30,15 @@ The report covers:
 - A Health Check Status/Severity guide appears above Recommended Action.
 - Sections with only `Unknown` or unavailable status data are not shown or
   counted.
-- Narrow margins are used throughout.
+- The report uses a 0.75-inch top margin and 0.5-inch margins on the other
+  sides. Body text uses Calibri 10 pt; evidence tables use Calibri 9 pt with
+  auto-fit columns.
 - The Winslow Tech Group logo appears in the upper-left header, and the report
   identifier appears in the upper-right header.
 - The footer has `Confidential` on the left, the Winslow Tech Group copyright
   notice in the center, and page numbering on the right.
-- If the local logo file is missing, the script downloads it from
-  winslowtg.com automatically.
+- The script downloads the WTG logo from winslowtg.com for each report and
+  uses the bundled logo if the download is unavailable.
 
 ## Assessment behavior
 
