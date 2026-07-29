@@ -18,6 +18,20 @@ if ($sampleErrors.Count -gt 0) {
 
 . $scriptPath
 
+if ((Split-Path -Leaf $script:ReportLogoPath) -ne 'winslow-technology-group-logo.png') {
+    throw 'Bundled report logo filename is incorrect.'
+}
+if ((Split-Path -Leaf (Split-Path -Parent $script:ReportLogoPath)) -ne 'images') {
+    throw 'Bundled report logo directory is incorrect.'
+}
+$reportSource = Get-Content -LiteralPath $scriptPath -Raw
+if ($reportSource -notmatch [regex]::Escape('$pngSignature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)')) {
+    throw 'The report logo download must validate the PNG signature.'
+}
+if ([regex]::Matches($reportSource, '(?m)^\s*Clear-ReportLogoCache\s*$').Count -lt 2) {
+    throw 'Temporary downloaded report logos must be cleaned up after report creation.'
+}
+
 if ($script:WdPaperLetter -ne 2) {
     throw 'The Word Letter paper-size constant must be 2.'
 }
@@ -467,7 +481,7 @@ $nativeReportData = [PSCustomObject]@{
     CollectionNotes = @('Example report generated without Microsoft Word.')
 }
 $nativeReportPath = Join-Path ([IO.Path]::GetTempPath()) ('ilo-health-native-' + [guid]::NewGuid().ToString('N') + '.docx')
-$logoFallbackPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\winslowtg-logo.png'
+$logoFallbackPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'images\winslow-technology-group-logo.png'
 try {
     $createdReport = New-OpenXmlHealthReport -Data $nativeReportData -OutputPath $nativeReportPath -CustomerName 'Example Customer' -LogoPath $logoFallbackPath
     Assert-Equal $createdReport $nativeReportPath 'Native DOCX generator returned the wrong path'
@@ -484,7 +498,8 @@ try {
             'word/styles.xml',
             'word/numbering.xml',
             'word/header1.xml',
-            'word/footer1.xml'
+            'word/footer1.xml',
+            'word/media/winslow-technology-group-logo.png'
         )) {
             if ($entryNames -notcontains $requiredEntry) {
                 throw "Native DOCX is missing $requiredEntry."
@@ -519,7 +534,11 @@ try {
             '<w:pgMar w:top="1080" w:right="720" w:bottom="720" w:left="720"',
             '<w:tblLayout w:type="autofit"/>',
             '<w:top w:w="60" w:type="dxa"/>',
-            '<w:bottom w:w="60" w:type="dxa"/>'
+            '<w:bottom w:w="60" w:type="dxa"/>',
+            'w:color="CCCCCC"',
+            'w:fill="F2F7FB"',
+            'w:sz="1" w:color="CCCCCC"',
+            '<w:cantSplit/>'
         )) {
             if ($documentText -notmatch [regex]::Escape($expectedLayoutText)) {
                 throw "Native DOCX is missing expected layout setting: $expectedLayoutText."
@@ -527,6 +546,7 @@ try {
         }
         foreach ($expectedStyleText in @(
             '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>',
+            '<w:style w:type="paragraph" w:styleId="Heading1"',
             '<w:style w:type="paragraph" w:styleId="Heading2"',
             '<w:color w:val="404040"/>'
         )) {

@@ -43,7 +43,7 @@ $script:WdPreferredWidthPoints = 3
 $script:ReportBlue = '005F9E'
 $script:ReportDark = '404040'
 $script:ReportStripe = 'F2F7FB'
-$script:ReportLogoPath = Join-Path $PSScriptRoot 'assets\winslowtg-logo.png'
+$script:ReportLogoPath = Join-Path $PSScriptRoot 'images\winslow-technology-group-logo.png'
 $script:ReportLogoUrl = 'https://winslowtg.com/wp-content/uploads/2022/07/logo-winslowtg@2x.png'
 $script:ReportLogoCachePath = $null
 $script:ReportLogPath = $null
@@ -617,6 +617,16 @@ function Resolve-ReportLogoPath {
         if (-not (Test-Path $temporaryLogoPath) -or (Get-Item $temporaryLogoPath).Length -eq 0) {
             throw 'The download completed without a usable image file.'
         }
+        $pngSignature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        $imageBytes = [IO.File]::ReadAllBytes($temporaryLogoPath)
+        if ($imageBytes.Length -lt $pngSignature.Length) {
+            throw 'The download completed without a usable PNG image file.'
+        }
+        for ($index = 0; $index -lt $pngSignature.Length; $index++) {
+            if ($imageBytes[$index] -ne $pngSignature[$index]) {
+                throw 'The download completed without a usable PNG image file.'
+            }
+        }
         $script:ReportLogoCachePath = $temporaryLogoPath
         return $script:ReportLogoCachePath
     }
@@ -630,6 +640,13 @@ function Resolve-ReportLogoPath {
         }
         throw "Unable to download the WinslowTG logo from $script:ReportLogoUrl, and the bundled fallback is missing: $script:ReportLogoPath. $($_.Exception.Message)"
     }
+}
+
+function Clear-ReportLogoCache {
+    if ($script:ReportLogoCachePath -and (Test-Path $script:ReportLogoCachePath)) {
+        Remove-Item -LiteralPath $script:ReportLogoCachePath -Force -ErrorAction SilentlyContinue
+    }
+    $script:ReportLogoCachePath = $null
 }
 
 function Test-NotApplicableReportValue {
@@ -1419,7 +1436,7 @@ function Add-WordHeading {
     $range.Text = "$Text`r"
     $paragraph = $range.Paragraphs.Item(1)
     $paragraph.Range.Style = "Heading $Level"
-    $paragraph.Range.Font.Name = if ($Level -eq 1) { 'Aptos Display' } else { 'Calibri' }
+    $paragraph.Range.Font.Name = 'Calibri'
     $paragraph.Range.Font.Size = if ($Level -eq 1) { 16 } else { 13 }
     $paragraph.Range.Font.Bold = -1
     $paragraph.Range.Font.Color = ConvertTo-WordColor $(if ($Level -eq 1) { $script:ReportBlue } else { $script:ReportDark })
@@ -1792,10 +1809,10 @@ function New-OpenXmlTable {
         New-OpenXmlCell -Value $Columns[$index] -Width $Widths[$index] -Fill '005F9E' -Color 'FFFFFF' -Bold -Size 9
     }
     $tableRows = @(
-        '<w:tr><w:trPr><w:tblHeader/></w:trPr>' + ($headerCells -join '') + '</w:tr>'
+        '<w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>' + ($headerCells -join '') + '</w:tr>'
     )
     for ($rowIndex = 0; $rowIndex -lt $Rows.Count; $rowIndex++) {
-        $fill = if ($rowIndex % 2 -eq 1) { 'EEF4F8' } else { 'FFFFFF' }
+        $fill = if ($rowIndex % 2 -eq 1) { 'F2F7FB' } else { 'FFFFFF' }
         $cells = for ($columnIndex = 0; $columnIndex -lt $Columns.Count; $columnIndex++) {
             $column = $Columns[$columnIndex]
             $value = $Rows[$rowIndex].$column
@@ -1808,11 +1825,11 @@ function New-OpenXmlTable {
             $color = if ($isStatus) { Get-OpenXmlStatusColor $displayValue } else { '222222' }
             New-OpenXmlCell -Value $displayValue -Width $Widths[$columnIndex] -Fill $fill -Color $color -Bold:$isStatus -Alignment $alignment
         }
-        $tableRows += '<w:tr>' + ($cells -join '') + '</w:tr>'
+        $tableRows += '<w:tr><w:trPr><w:cantSplit/></w:trPr>' + ($cells -join '') + '</w:tr>'
     }
 
     return @"
-<w:tbl><w:tblPr><w:tblW w:w="10800" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="4" w:color="C8D5DF"/><w:left w:val="single" w:sz="4" w:color="C8D5DF"/><w:bottom w:val="single" w:sz="4" w:color="C8D5DF"/><w:right w:val="single" w:sz="4" w:color="C8D5DF"/><w:insideH w:val="single" w:sz="4" w:color="DCE5EB"/><w:insideV w:val="single" w:sz="4" w:color="DCE5EB"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
+<w:tbl><w:tblPr><w:tblW w:w="10800" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:start w:w="120" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:end w:w="120" w:type="dxa"/></w:tblCellMar><w:tblBorders><w:top w:val="single" w:sz="1" w:color="CCCCCC"/><w:left w:val="single" w:sz="1" w:color="CCCCCC"/><w:bottom w:val="single" w:sz="1" w:color="CCCCCC"/><w:right w:val="single" w:sz="1" w:color="CCCCCC"/><w:insideH w:val="single" w:sz="1" w:color="CCCCCC"/><w:insideV w:val="single" w:sz="1" w:color="CCCCCC"/></w:tblBorders></w:tblPr><w:tblGrid>$grid</w:tblGrid>$($tableRows -join '')</w:tbl>
 "@
 }
 
@@ -1865,7 +1882,7 @@ function Add-OpenXmlBinaryPackageEntry {
 
 function New-OpenXmlLogoRun {
     return @'
-<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="1333500" cy="409575"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="Winslow Technology Group logo" descr="Winslow Technology Group logo"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="winslowtg-logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1333500" cy="409575"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
+<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="1333500" cy="409575"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="Winslow Technology Group logo" descr="Winslow Technology Group logo"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="winslow-technology-group-logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1333500" cy="409575"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
 '@
 }
 
@@ -1895,7 +1912,7 @@ function New-OpenXmlHealthReport {
     [void]$body.Add((New-OpenXmlParagraph -Text 'HP iLO Health Check' -Style 'Title' -Alignment center -Before 2300 -After 180 -Bold -Color '005F9E' -Size 28))
     [void]$body.Add((New-OpenXmlParagraph -Text $displayTarget -Style 'Subtitle' -Alignment center -After 100 -Color '203647' -Size 20))
     [void]$body.Add((New-OpenXmlParagraph -Text $CustomerName -Style 'Subtitle' -Alignment center -After 100 -Color '203647' -Size 16))
-    [void]$body.Add((New-OpenXmlParagraph -Text $reportDate -Alignment center -After 80 -Color '777777' -Size 12))
+    [void]$body.Add((New-OpenXmlParagraph -Text $reportDate -Alignment center -After 80 -Color '777777' -Size 13))
     [void]$body.Add((New-OpenXmlParagraph -Text '[Confidential]' -Alignment center -After 0 -Italic -Color '999999' -Size 10 -PageBreakAfter))
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Executive Overview' -Style 'Heading1' -Before 0 -After 160 -Bold -Color '005F9E' -Size 16 -KeepNext))
@@ -2012,7 +2029,7 @@ function New-OpenXmlHealthReport {
 "@
     $stylesXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="222222"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="56"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:color w:val="203647"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="320" w:after="160"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos Display" w:hAnsi="Aptos Display"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="280" w:after="140"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:color w:val="404040"/><w:sz w:val="26"/></w:rPr></w:style></w:styles>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="222222"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="56"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:color w:val="203647"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="320" w:after="160"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:color w:val="005F9E"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="280" w:after="140"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:color w:val="404040"/><w:sz w:val="26"/></w:rPr></w:style></w:styles>
 "@
     $numberingXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2040,7 +2057,7 @@ function New-OpenXmlHealthReport {
 "@
     $headerRelationships = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/winslowtg-logo.png"/></Relationships>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/winslow-technology-group-logo.png"/></Relationships>
 "@
     $created = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
     $coreXml = @"
@@ -2066,7 +2083,7 @@ function New-OpenXmlHealthReport {
         Add-OpenXmlPackageEntry $archive 'word/_rels/document.xml.rels' $documentRelationships
         Add-OpenXmlPackageEntry $archive 'word/header1.xml' $headerXml
         Add-OpenXmlPackageEntry $archive 'word/_rels/header1.xml.rels' $headerRelationships
-        Add-OpenXmlBinaryPackageEntry $archive 'word/media/winslowtg-logo.png' $logoPath
+        Add-OpenXmlBinaryPackageEntry $archive 'word/media/winslow-technology-group-logo.png' $logoPath
         Add-OpenXmlPackageEntry $archive 'word/footer1.xml' $footerXml
         Add-OpenXmlPackageEntry $archive 'docProps/core.xml' $coreXml
         Add-OpenXmlPackageEntry $archive 'docProps/app.xml' $appXml
@@ -2074,6 +2091,7 @@ function New-OpenXmlHealthReport {
     finally {
         if ($null -ne $archive) { $archive.Dispose() }
         else { $fileStream.Dispose() }
+        Clear-ReportLogoCache
     }
     return $resolved
 }
@@ -2245,6 +2263,7 @@ function New-WordHealthReport {
     finally {
         if ($null -ne $document) { $document.Close(0); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($document) }
         if ($null -ne $word) { $word.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
+        Clear-ReportLogoCache
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
     }

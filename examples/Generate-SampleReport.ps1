@@ -98,4 +98,4 @@ $reportData = [PSCustomObject]@{
 }
 
 $outputPath = Join-Path $PSScriptRoot 'sample-health-report.docx'
-New-OpenXmlHealthReport -Data $reportData -OutputPath $outputPath -CustomerName 'Example Customer' -LogoPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\winslowtg-logo.png')
+New-OpenXmlHealthReport -Data $reportData -OutputPath $outputPath -CustomerName 'Example Customer' -LogoPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'images\winslow-technology-group-logo.png')

@@ -37,8 +37,9 @@ The report covers:
   identifier appears in the upper-right header.
 - The footer has `Confidential` on the left, the Winslow Tech Group copyright
   notice in the center, and page numbering on the right.
-- The script downloads the WTG logo from winslowtg.com for each report and
-  uses the bundled logo if the download is unavailable.
+- The script validates and downloads the WTG logo from winslowtg.com for each
+  report, and uses `images/winslow-technology-group-logo.png` if the download
+  is unavailable.
 
 ## Assessment behavior
 
