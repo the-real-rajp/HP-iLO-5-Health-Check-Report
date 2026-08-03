@@ -1862,8 +1862,8 @@ function New-OpenXmlTable {
 function New-OpenXmlBulletParagraph {
     param([Parameter(Mandatory)][string]$Text)
 
-    return '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:after="80" w:line="276" w:lineRule="auto"/></w:pPr>' +
-        (New-OpenXmlRun -Text $Text -Size 9 -Color '666666') + '</w:p>'
+    return '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:after="80" w:line="240" w:lineRule="auto"/></w:pPr>' +
+        (New-OpenXmlRun -Text $Text -Size 10.5 -Color '222222') + '</w:p>'
 }
 
 function Add-OpenXmlPackageEntry {
@@ -2217,9 +2217,6 @@ function New-OpenXmlHealthReport {
     [void]$body.Add((New-OpenXmlParagraph -Text 'Health Check Status/Severity' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '404040' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlTable -Rows $healthCheckStatusGuidance -Columns @('Status / Severity', 'Guidance') -Widths @(3000, 7800) -StatusColumns))
     [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
-    [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 0 -After 100 -Bold -Color '404040' -Size 13 -KeepNext))
-    [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
-    [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
     [void]$body.Add((New-OpenXmlParagraph -Text 'Assessment Summary' -Style 'Heading2' -Before 0 -After 100 -Bold -Color '404040' -Size 13 -KeepNext))
     $assessmentRowCount = [Math]::Max(1, [Math]::Ceiling($assessment.Count / 2.0))
     $assessmentRows = for ($index = 0; $index -lt $assessmentRowCount; $index++) {
@@ -2235,6 +2232,9 @@ function New-OpenXmlHealthReport {
         }
     }
     [void]$body.Add((New-OpenXmlTable -Rows $assessmentRows -Columns @('Category', 'Severity', 'Category ', 'Severity ') -Widths @(3460, 1940, 3460, 1940) -StatusColumns))
+    [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Recommended Action' -Style 'Heading2' -Before 0 -After 100 -Bold -Color '404040' -Size 13 -KeepNext))
+    [void]$body.Add((New-OpenXmlParagraph -Text $recommendedAction -After 160 -Size 10.5))
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Information' -Style 'Heading1' -Before 220 -After 120 -Bold -Color '005F9E' -Size 16 -KeepNext -PageBreakBefore))
     foreach ($item in @(
@@ -2331,7 +2331,7 @@ function New-OpenXmlHealthReport {
 "@
     $numberingXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="540"/></w:tabs><w:ind w:left="540" w:hanging="260"/><w:spacing w:after="80" w:line="300" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="18"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="540"/></w:tabs><w:ind w:left="540" w:hanging="260"/><w:spacing w:after="80" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="21"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>
 "@
     $headerXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2463,11 +2463,11 @@ function New-WordHealthReport {
         Add-WordHeading $document 'Health Check Status/Severity' 2
         Add-WordTable $document $healthCheckStatusGuidance 'No status guidance is available.'
         Add-WordParagraph $document '' 11 $false '222222' 0
-        Add-WordHeading $document 'Recommended Action' 2
-        Add-WordParagraph $document $recommendedAction 11 $false '222222' 6
-        Add-WordParagraph $document '' 11 $false '222222' 0
         Add-WordHeading $document 'Assessment Summary' 2
         Add-AssessmentSummaryTable $document $assessment
+        Add-WordParagraph $document '' 11 $false '222222' 0
+        Add-WordHeading $document 'Recommended Action' 2
+        Add-WordParagraph $document $recommendedAction 11 $false '222222' 6
 
         Add-WordHeading $document 'Information' 1 -PageBreakBefore
         foreach ($item in @(

@@ -555,6 +555,30 @@ try {
         if ($summaryTableText -match '(?i)\bHealth\b') {
             throw 'Native DOCX System Information Summary must not contain Health.'
         }
+        $keyObjectivesHeading = $documentXml.SelectSingleNode('//w:p[w:r/w:t="Key Objectives"]', $documentNamespaces)
+        if ($null -eq $keyObjectivesHeading) { throw 'Native DOCX is missing the Key Objectives heading.' }
+        for ($objectiveIndex = 1; $objectiveIndex -le 3; $objectiveIndex++) {
+            $objectiveParagraph = $keyObjectivesHeading.SelectSingleNode("following-sibling::w:p[$objectiveIndex]", $documentNamespaces)
+            if ($null -eq $objectiveParagraph -or $null -eq $objectiveParagraph.SelectSingleNode('./w:pPr/w:numPr', $documentNamespaces)) {
+                throw "Key Objective $objectiveIndex must be a real bullet paragraph."
+            }
+            $objectiveSize = $objectiveParagraph.SelectSingleNode('./w:r/w:rPr/w:sz', $documentNamespaces)
+            $objectiveSpacing = $objectiveParagraph.SelectSingleNode('./w:pPr/w:spacing', $documentNamespaces)
+            $wordNamespace = $documentNamespaces.LookupNamespace('w')
+            if ($objectiveSize.GetAttribute('val', $wordNamespace) -ne '21') {
+                throw "Key Objective $objectiveIndex must use a 10.5-point font."
+            }
+            if ($objectiveSpacing.GetAttribute('line', $wordNamespace) -ne '240' -or
+                $objectiveSpacing.GetAttribute('lineRule', $wordNamespace) -ne 'auto') {
+                throw "Key Objective $objectiveIndex must use single spacing."
+            }
+        }
+        $assessmentHeading = $documentXml.SelectSingleNode('//w:p[w:r/w:t="Assessment Summary"]', $documentNamespaces)
+        $recommendedHeading = $documentXml.SelectSingleNode('//w:p[w:r/w:t="Recommended Action"]', $documentNamespaces)
+        $paragraphs = @($documentXml.SelectNodes('//w:body/w:p', $documentNamespaces))
+        if ([array]::IndexOf($paragraphs, $assessmentHeading) -ge [array]::IndexOf($paragraphs, $recommendedHeading)) {
+            throw 'Assessment Summary must precede Recommended Action.'
+        }
         foreach ($expectedFooterText in @(
             'Confidential',
             "$([char]0x00A9)2026 Winslow Tech Group. All Right Reserved",

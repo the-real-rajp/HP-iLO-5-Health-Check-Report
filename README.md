@@ -48,8 +48,8 @@ The report covers:
 The reusable implementation specification is in
 [REPORT_LAYOUT.md](REPORT_LAYOUT.md).
 
-- A branded cover page is followed by an Executive Overview, Recommended
-  Action, Assessment Summary, and grouped evidence tables.
+- A branded cover page is followed by an Executive Overview, Assessment
+  Summary, Recommended Action, and grouped evidence tables.
 - The Executive Overview includes three Key Objectives covering immediate risk,
   developing infrastructure concerns, and prioritized recommendations.
 - A Health Check Status/Severity guide appears above Recommended Action.
