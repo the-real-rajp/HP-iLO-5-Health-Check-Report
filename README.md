@@ -50,6 +50,8 @@ The reusable implementation specification is in
 
 - A branded cover page is followed by an Executive Overview, Recommended
   Action, Assessment Summary, and grouped evidence tables.
+- The Executive Overview includes three Key Objectives covering immediate risk,
+  developing infrastructure concerns, and prioritized recommendations.
 - A Health Check Status/Severity guide appears above Recommended Action.
 - Sections with only `Unknown` or unavailable status data are not shown or
   counted.

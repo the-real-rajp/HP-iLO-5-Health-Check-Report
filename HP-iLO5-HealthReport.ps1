@@ -1385,6 +1385,14 @@ function Get-RecommendedActionText {
     return $actions -join ' '
 }
 
+function Get-KeyObjectives {
+    return @(
+        'Identify conditions that present an immediate availability or data-protection risk.',
+        'Highlight developing capacity, performance, hardware, storage, and network concerns.',
+        'Document the current configuration and provide clear, prioritized recommendations.'
+    )
+}
+
 function Get-HealthCheckStatusGuidance {
     return @(
         [PSCustomObject][ordered]@{ 'Status / Severity' = 'HEALTHY'; Guidance = 'No recommendations required.' }
@@ -1422,6 +1430,24 @@ function Add-WordParagraph {
     $paragraph.Format.Alignment = switch ($Alignment) { 'Center' { 1 } 'Right' { 2 } default { 0 } }
     $paragraph.Format.SpaceBefore = $SpaceBefore
     $paragraph.Format.SpaceAfter = $SpaceAfter
+    $paragraph.Format.LineSpacingRule = 0
+}
+
+function Add-WordBulletParagraph {
+    param(
+        [Parameter(Mandatory)][object]$Document,
+        [Parameter(Mandatory)][string]$Text
+    )
+
+    $range = Get-EndRange $Document
+    $range.Text = "$Text`r"
+    $paragraph = $range.Paragraphs.Item(1)
+    $paragraph.Range.ListFormat.ApplyBulletDefault() | Out-Null
+    $paragraph.Range.Font.Name = 'Calibri'
+    $paragraph.Range.Font.Size = 10.5
+    $paragraph.Range.Font.Color = ConvertTo-WordColor '222222'
+    $paragraph.Format.SpaceBefore = 0
+    $paragraph.Format.SpaceAfter = 2
     $paragraph.Format.LineSpacingRule = 0
 }
 
@@ -2172,6 +2198,7 @@ function New-OpenXmlHealthReport {
     $headerText = "HP iLO Health Check $([char]0x2013) $displayTarget $([char]0x2013) $CustomerName"
     $assessment = @(New-AssessmentSummary $Data)
     $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
+    $keyObjectives = @(Get-KeyObjectives)
     $healthCheckStatusGuidance = @(Get-HealthCheckStatusGuidance)
     $body = [Collections.Generic.List[string]]::new()
 
@@ -2183,6 +2210,10 @@ function New-OpenXmlHealthReport {
 
     [void]$body.Add((New-OpenXmlParagraph -Text 'Executive Overview' -Style 'Heading1' -Before 0 -After 160 -Bold -Color '005F9E' -Size 16 -KeepNext))
     [void]$body.Add((New-OpenXmlParagraph -Text "$CustomerName engaged Professional Services to conduct an HP iLO Health Check of $displayTarget. This report documents the discovery, analysis, and recommendations from the assessment." -After 160 -Size 10.5))
+    [void]$body.Add((New-OpenXmlParagraph -Text 'Key Objectives' -Style 'Heading2' -Before 0 -After 60 -Bold -Color '404040' -Size 13 -KeepNext))
+    foreach ($keyObjective in $keyObjectives) {
+        [void]$body.Add((New-OpenXmlBulletParagraph -Text $keyObjective))
+    }
     [void]$body.Add((New-OpenXmlParagraph -Text 'Health Check Status/Severity' -Style 'Heading2' -Before 120 -After 100 -Bold -Color '404040' -Size 13 -KeepNext))
     [void]$body.Add((New-OpenXmlTable -Rows $healthCheckStatusGuidance -Columns @('Status / Severity', 'Guidance') -Widths @(3000, 7800) -StatusColumns))
     [void]$body.Add((New-OpenXmlParagraph -Text '' -After 0 -Size 10))
@@ -2423,7 +2454,12 @@ function New-WordHealthReport {
 
         $assessment = @(New-AssessmentSummary $Data)
         $recommendedAction = Get-RecommendedActionText -Data $Data -Assessment $assessment
+        $keyObjectives = @(Get-KeyObjectives)
         $healthCheckStatusGuidance = @(Get-HealthCheckStatusGuidance)
+        Add-WordHeading $document 'Key Objectives' 2
+        foreach ($keyObjective in $keyObjectives) {
+            Add-WordBulletParagraph $document $keyObjective
+        }
         Add-WordHeading $document 'Health Check Status/Severity' 2
         Add-WordTable $document $healthCheckStatusGuidance 'No status guidance is available.'
         Add-WordParagraph $document '' 11 $false '222222' 0

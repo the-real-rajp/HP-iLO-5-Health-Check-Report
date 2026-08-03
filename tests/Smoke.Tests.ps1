@@ -295,6 +295,9 @@ Assert-Equal (Get-RemoteSupportAssessmentStatus @($remoteSupport)) 'HEALTHY' 'Re
 Assert-Equal (Get-RemoteSupportAssessmentStatus @([PSCustomObject]@{ Registration = 'Not registered' })) 'RECOMMENDED' 'Unregistered Remote Support should be recommended'
 Assert-Equal (Get-RemoteSupportAssessmentStatus @()) $null 'Uncollected Remote Support should not be assessed'
 Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Health = 'Unknown'; State = 'Unknown' })) $null 'Unknown-only evidence should not be assessed'
+$keyObjectives = @(Get-KeyObjectives)
+Assert-Equal $keyObjectives.Count 3 'Key Objectives count is incorrect'
+Assert-Equal $keyObjectives[0] 'Identify conditions that present an immediate availability or data-protection risk.' 'First Key Objective is incorrect'
 
 $unknownReportData = [PSCustomObject]@{
     Example = @([PSCustomObject][ordered]@{ Name = 'Adapter 1'; Health = 'Unknown'; State = 'Enabled' })
@@ -603,6 +606,10 @@ try {
         }
         foreach ($expectedText in @(
             'Recommended Action',
+            'Key Objectives',
+            'Identify conditions that present an immediate availability or data-protection risk.',
+            'Highlight developing capacity, performance, hardware, storage, and network concerns.',
+            'Document the current configuration and provide clear, prioritized recommendations.',
             'Health Check Status/Severity',
             'Status / Severity',
             'Guidance',
