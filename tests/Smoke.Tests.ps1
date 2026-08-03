@@ -292,9 +292,11 @@ $remoteSupport = Convert-RemoteSupportRegistration ([PSCustomObject]@{
 })
 Assert-Equal $remoteSupport.Registration 'Registered' 'Remote Support registration conversion failed'
 Assert-Equal (Get-RemoteSupportAssessmentStatus @($remoteSupport)) 'HEALTHY' 'Registered Remote Support should be healthy'
-Assert-Equal (Get-RemoteSupportAssessmentStatus @([PSCustomObject]@{ Registration = 'Not registered' })) 'RECOMMENDED' 'Unregistered Remote Support should be recommended'
+Assert-Equal (Get-RemoteSupportAssessmentStatus @([PSCustomObject]@{ Registration = 'Not registered' })) 'WARNING' 'Unregistered Remote Support should be a warning'
 Assert-Equal (Get-RemoteSupportAssessmentStatus @()) $null 'Uncollected Remote Support should not be assessed'
 Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Health = 'Unknown'; State = 'Unknown' })) $null 'Unknown-only evidence should not be assessed'
+Assert-Equal (Get-AssessmentStatus @([PSCustomObject]@{ Health = 'Recommended' })) 'WARNING' 'Recommended evidence should display as a warning'
+Assert-Equal (Get-ReportStatusDisplayValue 'Recommended') 'WARNING' 'Recommended status values should display as WARNING'
 $keyObjectives = @(Get-KeyObjectives)
 Assert-Equal $keyObjectives.Count 3 'Key Objectives count is incorrect'
 Assert-Equal $keyObjectives[0] 'Identify conditions that present an immediate availability or data-protection risk.' 'First Key Objective is incorrect'

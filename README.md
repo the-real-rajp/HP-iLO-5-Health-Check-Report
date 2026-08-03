@@ -76,7 +76,7 @@ The reusable implementation specification is in
   recommended-action logic.
 - An unconfigured Dedicated Network Port is `IGNORED`; an unconfigured Shared
   Network Port is omitted.
-- Remote Support is `HEALTHY` when registered, `RECOMMENDED` when explicitly
+- Remote Support is `HEALTHY` when registered, `WARNING` when explicitly
   unregistered or reporting a transmission error, and omitted when its
   registration is unknown.
 - An `Ignored` Overall Security Status or individual Security Dashboard finding
@@ -84,7 +84,7 @@ The reusable implementation specification is in
   `CRITICAL`. Ignored findings do not add a separate Ignored column.
 - HPE Compute Ops Management uses iLO's HPE `CloudConnect` status and never
   exposes the GreenLake activation key. It is optional: `NotEnabled` remains
-  visible in Information but does not make that assessment `RECOMMENDED`.
+  visible in Information but does not make that assessment `WARNING`.
 
 The script starts at `/redfish/v1/` and follows the links advertised by iLO,
 so it does not assume that every server uses the same system, chassis, or

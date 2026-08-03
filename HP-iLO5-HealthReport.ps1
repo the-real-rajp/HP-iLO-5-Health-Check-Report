@@ -1180,7 +1180,7 @@ function Get-StatusColor {
     param([AllowNull()][object]$Value)
     $text = [string]$Value
     if ($text -match '(?i)critical|failed|fatal|risk') { return ConvertTo-WordColor 'D00000' }
-    if ($text -match '(?i)warning|degraded|caution|recommended|ignored') { return ConvertTo-WordColor 'E59B00' }
+    if ($text -match '(?i)warning|degraded|caution|ignored') { return ConvertTo-WordColor 'E59B00' }
     if ($text -match '(?i)^ok$|^enabled$|^healthy$|^connected$|^registered$') { return ConvertTo-WordColor '008A3B' }
     if ($text -match '(?i)^info$') { return ConvertTo-WordColor '4F81BD' }
     return ConvertTo-WordColor '555555'
@@ -1213,7 +1213,7 @@ function Get-AssessmentStatus {
     if ($signals.Count -eq 0) { return $null }
     $evidence = $signals -join ' '
     if ($evidence -match '(?i)critical|failed|fatal|risk') { return 'CRITICAL' }
-    if ($evidence -match '(?i)warning|degraded|caution|disabled|ignored|notconnected|notenabled|retryinprogress|connectioninprogress') { return 'RECOMMENDED' }
+    if ($evidence -match '(?i)warning|recommended|degraded|caution|disabled|ignored|notconnected|notenabled|retryinprogress|connectioninprogress') { return 'WARNING' }
     return 'HEALTHY'
 }
 
@@ -1291,7 +1291,7 @@ function Get-IloNetworkPortAssessmentStatus {
     $linkStatus = if ($linkStatusRow.Count -gt 0) { [string](Get-ObjectProperty $linkStatusRow[0] 'Value' '') } else { '' }
     if ("$health$linkStatus" -match '(?i)^\s*(unknown)?\s*$') { return $null }
     if ("$health $linkStatus" -match '(?i)critical|failed|fatal') { return 'CRITICAL' }
-    if ("$health $linkStatus" -match '(?i)warning|degraded|unknown|nolink|linkdown') { return 'RECOMMENDED' }
+    if ("$health $linkStatus" -match '(?i)warning|recommended|degraded|unknown|nolink|linkdown') { return 'WARNING' }
     return 'HEALTHY'
 }
 
@@ -1301,9 +1301,9 @@ function Get-RemoteSupportAssessmentStatus {
     if (@($Rows).Count -eq 0) { return $null }
     $registration = [string](Get-ObjectProperty $Rows[0] 'Registration' '')
     $lastError = [string](Get-ObjectProperty $Rows[0] 'Last transmission error' '')
-    if ($lastError -and $lastError -notmatch '(?i)^(none|no error|unknown)$') { return 'RECOMMENDED' }
+    if ($lastError -and $lastError -notmatch '(?i)^(none|no error|unknown)$') { return 'WARNING' }
     if ($registration -match '(?i)^registered$') { return 'HEALTHY' }
-    if ($registration -match '(?i)^not registered$') { return 'RECOMMENDED' }
+    if ($registration -match '(?i)^not registered$') { return 'WARNING' }
     return $null
 }
 
@@ -1376,8 +1376,8 @@ function Get-RecommendedActionText {
     if ($otherCritical.Count -gt 0) {
         $actions.Add("Review and remediate the critical findings in: $($otherCritical -join ', ').")
     }
-    if (@($Assessment | Where-Object { $_.Status -in @('WARNING', 'RECOMMENDED') }).Count -gt 0) {
-        $actions.Add('Review the sections marked WARNING or RECOMMENDED in the Assessment Summary and validate unavailable or uncollected configuration areas.')
+    if (@($Assessment | Where-Object { $_.Status -eq 'WARNING' }).Count -gt 0) {
+        $actions.Add('Review the sections marked WARNING in the Assessment Summary and validate unavailable or uncollected configuration areas.')
     }
     if ($actions.Count -eq 0) {
         $actions.Add('No immediate corrective action is required. Continue routine monitoring and periodic health checks.')
@@ -1753,7 +1753,7 @@ function Get-OpenXmlStatusColor {
 
     switch -Regex ([string]$Status) {
         '^(CRITICAL|Critical|Failed|Fatal|Risk)$' { return 'C00000' }
-        '^(WARNING|RECOMMENDED|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
+        '^(WARNING|Warning|Degraded|Caution|Ignored)$' { return 'BF7200' }
         '^(HEALTHY|OK|Ok|Enabled|Connected)$' { return '00843D' }
         '^(INFO|Info)$' { return '4F81BD' }
         default { return '666666' }
@@ -1764,6 +1764,7 @@ function Get-ReportStatusDisplayValue {
     param([AllowNull()][object]$Value)
 
     if ([string]$Value -match '(?i)^ok$') { return 'HEALTHY' }
+    if ([string]$Value -match '(?i)^recommended$') { return 'WARNING' }
     return $Value
 }
 
